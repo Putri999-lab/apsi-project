@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.agents
+.claude
+.windsurf
+.env
+.env*.local
+*.log
