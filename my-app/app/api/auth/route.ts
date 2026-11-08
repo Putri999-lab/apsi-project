@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   AuthRequestError,
+  assertAuthConfiguration,
   clearSession,
   getCurrentUser,
   getUserForCredentials,
@@ -25,7 +26,14 @@ async function readBody(request: Request): Promise<JsonObject> {
 function errorResponse(error: unknown) {
   const status =
     error instanceof AuthRequestError ? error.status : 500;
-  if (!(error instanceof AuthRequestError)) console.error("Authentication request failed.", error);
+  if (!(error instanceof AuthRequestError)) {
+    const details =
+      typeof error === "object" && error !== null && "code" in error &&
+      typeof error.code === "string"
+        ? { name: error instanceof Error ? error.name : "UnknownError", code: error.code }
+        : { name: error instanceof Error ? error.name : "UnknownError" };
+    console.error("Authentication request failed.", details);
+  }
   return NextResponse.json(
     { error: error instanceof AuthRequestError ? error.message : "Permintaan autentikasi gagal." },
     { status },
@@ -47,11 +55,13 @@ export async function POST(request: Request) {
   try {
     const body = await readBody(request);
     if (body.action === "register") {
+      assertAuthConfiguration();
       const { user, accountType } = await registerAccount(body);
       await setSession(user, accountType);
       return NextResponse.json({ user }, { status: 201 });
     }
     if (body.action === "login") {
+      assertAuthConfiguration();
       if (typeof body.email !== "string" || typeof body.password !== "string") {
         return NextResponse.json({ error: "Email dan kata sandi wajib diisi." }, { status: 400 });
       }

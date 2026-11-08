@@ -37,6 +37,16 @@ function sessionSecret() {
   return secret;
 }
 
+export function assertAuthConfiguration() {
+  const secret = process.env.AUTH_SECRET;
+  if (!secret || Buffer.byteLength(secret) < 32) {
+    throw new AuthRequestError(
+      "Autentikasi belum dikonfigurasi. Hubungi administrator.",
+      503,
+    );
+  }
+}
+
 function sign(value: string) {
   return createHmac("sha256", sessionSecret()).update(value).digest();
 }

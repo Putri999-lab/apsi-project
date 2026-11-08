@@ -7,6 +7,9 @@ const workspaceRoot = resolve(appRoot, "..");
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: workspaceRoot,
+  experimental: {
+    cpus: 1,
+  },
 };
 
 export default nextConfig;
