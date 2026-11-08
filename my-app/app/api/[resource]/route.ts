@@ -103,6 +103,10 @@ async function normalizeValues(
 
     if (field.kind === "number") {
       if (value === "" || value === null || value === undefined) {
+        if (!field.required) {
+          normalized[field.name] = null;
+          continue;
+        }
         throw new RequestError(`${field.label} wajib diisi.`);
       }
       const numberValue = typeof value === "number" ? value : Number(value);
@@ -141,11 +145,24 @@ async function normalizeValues(
     if (field.kind === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
       throw new RequestError(`${field.label} tidak valid.`);
     }
+    if (field.kind === "url" && value.trim()) {
+      let parsed: URL;
+      try {
+        parsed = new URL(value.trim());
+      } catch {
+        throw new RequestError(`${field.label} harus berupa URL yang valid.`);
+      }
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        throw new RequestError(`${field.label} harus menggunakan HTTP atau HTTPS.`);
+      }
+      normalized[field.name] = value.trim();
+      continue;
+    }
     if (field.options && !field.options.includes(value)) {
       throw new RequestError(`Nilai ${field.label} tidak didukung.`);
     }
 
-    normalized[field.name] = value.trim();
+    normalized[field.name] = value.trim() || (field.kind === "url" ? null : "");
   }
 
   if (
@@ -299,163 +316,247 @@ async function getList(resource: ResourceKey, request: Request, user: AuthUser) 
   return NextResponse.json(result.rows);
 }
 
-function parseDetailValues(values: unknown) {
-  if (!isRecord(values)) {
-    throw new RequestError("Form data must be an object.");
-  }
-  const orderNumber = values.no_pesanan;
-  const productId = values.id_produk;
-  const quantity = typeof values.jumlah === "number" ? values.jumlah : Number(values.jumlah);
-
-  if (typeof orderNumber !== "string" || !orderNumber.trim() || orderNumber.length > 10) {
-    throw new RequestError("Pilih pesanan yang valid.");
-  }
-  if (typeof productId !== "string" || !productId.trim() || productId.length > 10) {
-    throw new RequestError("Pilih produk yang valid.");
-  }
-  if (!Number.isSafeInteger(quantity) || quantity < 1) {
-    throw new RequestError("Jumlah harus berupa bilangan bulat minimal 1.");
-  }
-
-  return { orderNumber: orderNumber.trim(), productId: productId.trim(), quantity };
-}
-
-async function detailCreate(client: Prisma.TransactionClient, values: unknown) {
-  const detail = parseDetailValues(values);
-  const product = await query<{ stok_produk: number | null; harga_produk: string | null }>(
-    client,
-    `SELECT stok_produk, harga_produk
-     FROM "Produk"
-     WHERE id_produk = $1
-     FOR UPDATE`,
-    [detail.productId],
-  );
-
-  if (product.rowCount === 0) {
-    throw new RequestError("Produk tidak ditemukan.", 404);
-  }
-  const stock: number | null = product.rows[0].stok_produk;
-  const price: string | null = product.rows[0].harga_produk;
-  if (stock === null || price === null) {
-    throw new RequestError("Isi stok dan harga produk terlebih dahulu.", 409);
-  }
-  if (detail.quantity > stock) {
-    throw new RequestError("Stok produk tidak mencukupi.", 409);
-  }
-
-  const stockAfter = stock - detail.quantity;
-  await query(client,
-    `INSERT INTO "DetailPesanan"
-       (no_pesanan, id_produk, jumlah, harga_satuan, stok_produk_sebelum, stok_produk_sesudah)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [
-      detail.orderNumber,
-      detail.productId,
-      detail.quantity,
-      price,
-      stock,
-      stockAfter,
-    ],
-  );
-  await query(client, `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
-    stockAfter,
-    detail.productId,
-  ]);
-  return { ...detail, harga_satuan: price, stok_produk_sebelum: stock, stok_produk_sesudah: stockAfter };
-}
-
-async function detailUpdate(client: Prisma.TransactionClient, keys: string[], values: unknown) {
-  const detail = parseDetailValues(values);
-  if (keys[0] !== detail.orderNumber || keys[1] !== detail.productId) {
-    throw new RequestError("Order and product keys cannot be changed.", 400);
-  }
-
-  const product = await query<{ stok_produk: number | null }>(
-    client,
-    `SELECT stok_produk
-     FROM "Produk"
-     WHERE id_produk = $1
-     FOR UPDATE`,
-    [detail.productId],
-  );
-  const stock: number | null = product.rows[0]?.stok_produk ?? null;
-  if (stock === null) {
-    throw new RequestError("Stok produk belum diatur; stok detail tidak dapat diselaraskan.", 409);
-  }
-
-  const currentDetail = await query<{ jumlah: number; harga_satuan: string }>(
-    client,
-    `SELECT jumlah, harga_satuan
-     FROM "DetailPesanan"
-     WHERE no_pesanan = $1 AND id_produk = $2
-     FOR UPDATE`,
-    keys,
-  );
-  if (currentDetail.rowCount === 0) {
-    throw new RequestError("Order detail not found.", 404);
-  }
-
-  const available = stock + Number(currentDetail.rows[0].jumlah);
-  if (detail.quantity > available) {
-    throw new RequestError("Stok produk tidak mencukupi.", 409);
-  }
-  const stockAfter = available - detail.quantity;
-  await query(client,
-    `UPDATE "DetailPesanan"
-     SET jumlah = $1, stok_produk_sebelum = $2, stok_produk_sesudah = $3
-     WHERE no_pesanan = $4 AND id_produk = $5`,
-    [detail.quantity, available, stockAfter, ...keys],
-  );
-  await query(client, `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
-    stockAfter,
-    detail.productId,
-  ]);
-  return {
-    ...detail,
-    harga_satuan: currentDetail.rows[0].harga_satuan,
-    stok_produk_sebelum: available,
-    stok_produk_sesudah: stockAfter,
-  };
-}
-
-async function detailDelete(client: Prisma.TransactionClient, keys: string[]) {
-  const product = await query<{ stok_produk: number | null }>(
-    client,
-    `SELECT stok_produk
-     FROM "Produk"
-     WHERE id_produk = $1
-     FOR UPDATE`,
-    [keys[1]],
-  );
-  const stock: number | null = product.rows[0]?.stok_produk ?? null;
-  if (stock === null) {
-    throw new RequestError("Stok produk belum diatur; stok detail tidak dapat diselaraskan.", 409);
-  }
-
-  const currentDetail = await query<{ jumlah: number }>(
-    client,
-    `SELECT jumlah
-     FROM "DetailPesanan"
-     WHERE no_pesanan = $1 AND id_produk = $2
-     FOR UPDATE`,
-    keys,
-  );
-  if (currentDetail.rowCount === 0) {
-    throw new RequestError("Order detail not found.", 404);
-  }
-
-  await query(client,
-    `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`,
-    [stock + Number(currentDetail.rows[0].jumlah), keys[1]],
-  );
-  await query(client,
-    `DELETE FROM "DetailPesanan" WHERE no_pesanan = $1 AND id_produk = $2`,
-    keys,
-  );
-}
-
 async function inTransaction<T>(work: (client: Prisma.TransactionClient) => Promise<T>) {
   return prisma.$transaction(work, { maxWait: 5000, timeout: 15000 });
+}
+
+async function createProduction(values: JsonRecord, user: AuthUser) {
+  if (user.role !== "ADMIN") {
+    throw new RequestError("Hanya Admin yang dapat menugaskan pekerjaan produksi.", 403);
+  }
+  if (values.status_produksi !== "Menunggu") {
+    throw new RequestError("Pekerjaan produksi baru harus dibuat dengan status Menunggu.");
+  }
+
+  return inTransaction(async (client) => {
+    const orderNumber = String(values.no_pesanan);
+    const order = await query<{ status_pesanan: string }>(
+      client,
+      `SELECT status_pesanan FROM "Pesanan" WHERE no_pesanan = $1 FOR UPDATE`,
+      [orderNumber],
+    );
+    if (!order.rowCount || order.rows[0].status_pesanan !== "Diproses") {
+      throw new RequestError("Pesanan harus sudah dibayar dan berstatus Diproses sebelum ditugaskan.", 409);
+    }
+
+    const [payment, existingProduction] = await Promise.all([
+      query(client,
+        `SELECT 1 FROM "Pembayaran" WHERE no_pesanan = $1 AND status_pembayaran = 'Berhasil' LIMIT 1`,
+        [orderNumber],
+      ),
+      query(client,
+        `SELECT 1 FROM "Produksi" WHERE no_pesanan = $1 LIMIT 1`,
+        [orderNumber],
+      ),
+    ]);
+    if (!payment.rowCount) {
+      throw new RequestError("Pesanan belum memiliki pembayaran terverifikasi.", 409);
+    }
+    if (existingProduction.rowCount) {
+      throw new RequestError("Pesanan sudah memiliki penugasan produksi.", 409);
+    }
+
+    const columns = Object.keys(values);
+    const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
+    const result = await query(client,
+      `INSERT INTO "Produksi" (${columns.map((column) => `"${column}"`).join(", ")})
+       VALUES (${placeholders})
+       RETURNING id_produksi, no_pesanan, id_karyawan, status_produksi`,
+      columns.map((column) => values[column]),
+    );
+    return result.rows[0];
+  });
+}
+
+async function updateProduction(keys: string[], values: JsonRecord, user: AuthUser) {
+  const updatedFields = Object.keys(values).filter((field) => !queries.production.keyFields.includes(field));
+  if (updatedFields.length === 0) throw new RequestError("Tidak ada perubahan produksi.");
+
+  return inTransaction(async (client) => {
+    const current = await query<{
+      no_pesanan: string;
+      id_karyawan: string;
+      status_produksi: string;
+      tanggal_mulai_produksi: string;
+    }>(
+      client,
+      `SELECT no_pesanan, id_karyawan, status_produksi, tanggal_mulai_produksi
+       FROM "Produksi" WHERE id_produksi = $1 FOR UPDATE`,
+      keys,
+    );
+    if (!current.rowCount) throw new RequestError("Pekerjaan produksi tidak ditemukan.", 404);
+    const production = current.rows[0];
+    if (user.role === "EMPLOYEE") {
+      if (production.id_karyawan !== user.id) {
+        throw new RequestError("Pekerjaan produksi tidak ditemukan.", 404);
+      }
+      const nextStatus = values.status_produksi;
+      const today = new Date().toISOString().slice(0, 10);
+      if (production.status_produksi === "Menunggu" && nextStatus === "Diproses") {
+        await query(client,
+          `UPDATE "Produksi" SET status_produksi = 'Diproses', tanggal_mulai_produksi = $1 WHERE id_produksi = $2`,
+          [today, keys[0]],
+        );
+      } else if (production.status_produksi === "Diproses" && nextStatus === "Selesai") {
+        const order = await query<{ status_pesanan: string }>(
+          client,
+          `SELECT status_pesanan FROM "Pesanan" WHERE no_pesanan = $1 FOR UPDATE`,
+          [production.no_pesanan],
+        );
+        if (!order.rowCount || order.rows[0].status_pesanan !== "Diproses") {
+          throw new RequestError("Pesanan tidak lagi memenuhi syarat untuk diselesaikan.", 409);
+        }
+        await query(client,
+          `UPDATE "Produksi" SET status_produksi = 'Selesai', tanggal_selesai_produksi = $1 WHERE id_produksi = $2`,
+          [today, keys[0]],
+        );
+        await query(client,
+          `UPDATE "Pesanan" SET status_pesanan = 'Selesai'
+           WHERE no_pesanan = $1 AND status_pesanan = 'Diproses'`,
+          [production.no_pesanan],
+        );
+      } else {
+        throw new RequestError("Perubahan status produksi tidak valid.", 409);
+      }
+      return { id_produksi: keys[0], no_pesanan: production.no_pesanan, status_produksi: nextStatus };
+    }
+    if (Object.hasOwn(values, "status_produksi") &&
+        values.status_produksi !== production.status_produksi) {
+      throw new RequestError("Status produksi hanya dapat dimulai atau diselesaikan oleh Karyawan Produksi.", 403);
+    }
+    if (values.no_pesanan !== production.no_pesanan) {
+      throw new RequestError("Pesanan produksi tidak dapat diganti.", 403);
+    }
+    const result = await query(client,
+      `UPDATE "Produksi"
+       SET ${updatedFields.map((field, index) => `"${field}" = $${index + 1}`).join(", ")}
+       WHERE id_produksi = $${updatedFields.length + 1}
+       RETURNING id_produksi, no_pesanan, id_karyawan, status_produksi`,
+      [...updatedFields.map((field) => values[field]), ...keys],
+    );
+    return result.rows[0];
+  });
+}
+
+async function updatePayment(keys: string[], values: JsonRecord) {
+  if (Object.keys(values).some((field) => field !== "status_pembayaran")) {
+    throw new RequestError("Data pembayaran hanya dapat diubah melalui proses verifikasi.", 403);
+  }
+
+  return inTransaction(async (client) => {
+    const current = await query<{
+      no_pesanan: string;
+      metode_pembayaran: string;
+      status_pembayaran: string;
+      bukti_pembayaran_url: string | null;
+    }>(
+      client,
+      `SELECT no_pesanan, metode_pembayaran, status_pembayaran, bukti_pembayaran_url
+       FROM "Pembayaran" WHERE id_pembayaran = $1 FOR UPDATE`,
+      keys,
+    );
+    if (!current.rowCount) throw new RequestError("Pembayaran tidak ditemukan.", 404);
+    const payment = current.rows[0];
+    const nextStatus = values.status_pembayaran;
+    if (!["Berhasil", "Ditolak"].includes(String(nextStatus))) {
+      throw new RequestError("Admin hanya dapat menyetujui atau menolak pembayaran yang menunggu.", 409);
+    }
+    if (nextStatus === "Berhasil") {
+      if (!["Menunggu", "Konfirmasi"].includes(payment.status_pembayaran)) {
+        throw new RequestError("Pembayaran ini tidak lagi menunggu verifikasi.", 409);
+      }
+      if (payment.metode_pembayaran !== "Tunai" && !payment.bukti_pembayaran_url) {
+        throw new RequestError("Bukti pembayaran wajib tersedia sebelum pembayaran diverifikasi.", 409);
+      }
+      const order = await query<{ status_pesanan: string }>(
+        client,
+        `SELECT status_pesanan FROM "Pesanan" WHERE no_pesanan = $1 FOR UPDATE`,
+        [payment.no_pesanan],
+      );
+      if (!order.rowCount || order.rows[0].status_pesanan !== "Baru") {
+        throw new RequestError("Pesanan tidak lagi menunggu verifikasi pembayaran.", 409);
+      }
+    }
+    if (nextStatus === "Ditolak" && !["Menunggu", "Konfirmasi"].includes(payment.status_pembayaran)) {
+      throw new RequestError("Pembayaran ini tidak lagi menunggu keputusan.", 409);
+    }
+
+    const result = await query(client,
+      `UPDATE "Pembayaran" SET status_pembayaran = $1
+       WHERE id_pembayaran = $2
+       RETURNING id_pembayaran, no_pesanan, status_pembayaran`,
+      [nextStatus, keys[0]],
+    );
+    if (nextStatus === "Berhasil") {
+      await query(client,
+        `UPDATE "Pesanan" SET status_pesanan = 'Diproses'
+         WHERE no_pesanan = $1 AND status_pesanan = 'Baru'`,
+        [payment.no_pesanan],
+      );
+    }
+    return result.rows[0];
+  });
+}
+
+async function updateHandover(keys: string[], values: JsonRecord) {
+  const updatedFields = Object.keys(values).filter((field) => !queries.handover.keyFields.includes(field));
+  if (updatedFields.length === 0) throw new RequestError("Tidak ada perubahan penyerahan.");
+  return inTransaction(async (client) => {
+    const current = await query<{ no_pesanan: string; status_penyerahan: string }>(
+      client,
+      `SELECT no_pesanan, status_penyerahan FROM "Penyerahan" WHERE id_penyerahan = $1 FOR UPDATE`,
+      keys,
+    );
+    if (!current.rowCount) throw new RequestError("Data penyerahan tidak ditemukan.", 404);
+    const handover = current.rows[0];
+    if (Object.hasOwn(values, "status_penyerahan") &&
+        handover.status_penyerahan === "Diserahkan" &&
+        values.status_penyerahan !== "Diserahkan") {
+      throw new RequestError("Status penyerahan yang selesai tidak dapat dikembalikan.", 409);
+    }
+    if (values.status_penyerahan === "Diserahkan" && handover.status_penyerahan !== "Diserahkan") {
+      const order = await query<{ status_pesanan: string }>(
+        client,
+        `SELECT status_pesanan FROM "Pesanan" WHERE no_pesanan = $1 FOR UPDATE`,
+        [handover.no_pesanan],
+      );
+      if (!order.rowCount || order.rows[0].status_pesanan !== "Selesai") {
+        throw new RequestError("Pesanan harus selesai diproduksi sebelum diserahkan.", 409);
+      }
+      const [production, payment] = await Promise.all([
+        query(client,
+          `SELECT 1 FROM "Produksi" WHERE no_pesanan = $1 AND status_produksi = 'Selesai' LIMIT 1`,
+          [handover.no_pesanan],
+        ),
+        query(client,
+          `SELECT 1 FROM "Pembayaran" WHERE no_pesanan = $1 AND status_pembayaran = 'Berhasil' LIMIT 1`,
+          [handover.no_pesanan],
+        ),
+      ]);
+      if (!production.rowCount) {
+        throw new RequestError("Produksi harus selesai sebelum pesanan dapat diserahkan.", 409);
+      }
+      if (!payment.rowCount) {
+        throw new RequestError("Pembayaran harus berhasil sebelum pesanan dapat diserahkan.", 409);
+      }
+      values.tanggal_penyerahan = new Date().toISOString().slice(0, 10);
+    }
+    const result = await query(client,
+      `UPDATE "Penyerahan"
+       SET ${updatedFields.map((field, index) => `"${field}" = $${index + 1}`).join(", ")}
+       WHERE id_penyerahan = $${updatedFields.length + 1}
+       RETURNING id_penyerahan, no_pesanan, status_penyerahan`,
+      [...updatedFields.map((field) => values[field]), ...keys],
+    );
+    if (values.status_penyerahan === "Diserahkan") {
+      await query(client,
+        `UPDATE "Pesanan" SET status_pesanan = 'Diserahkan'
+         WHERE no_pesanan = $1 AND status_pesanan = 'Selesai'`,
+        [handover.no_pesanan],
+      );
+    }
+    return result.rows[0];
+  });
 }
 
 async function saveRecord(resource: ResourceKey, operation: Operation, body: unknown, user: AuthUser) {
@@ -465,15 +566,40 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
   const values = await normalizeValues(resource, body.values, operation);
   const definition = queries[resource];
 
-  if (resource === "order-details") {
-    if (operation === "create") {
-      return inTransaction((client) => detailCreate(client, body.values));
+  if (resource === "users" && user.role === "ADMIN") {
+    if (operation === "create" && !["Employee", "Karyawan"].includes(String(values.peran))) {
+      throw new RequestError("Admin hanya dapat membuat akun Karyawan Produksi.", 403);
     }
-    const keys = normalizeKeys(resource, body.keys);
-    return inTransaction((client) => detailUpdate(client, keys, body.values));
+    if (operation === "update" && Object.hasOwn(values, "peran")) {
+      throw new RequestError("Admin tidak dapat mengubah hak akses pengguna.", 403);
+    }
+  }
+
+  if (resource === "orders") {
+    throw new RequestError("Pesanan dibuat melalui checkout dan statusnya diperbarui otomatis oleh alur bisnis.", 403);
+  }
+
+  if (resource === "order-details") {
+    throw new RequestError("Rincian pesanan disimpan saat checkout dan tidak dapat diubah agar riwayat transaksi tetap utuh.", 403);
+  }
+
+  if (resource === "reviews") {
+    throw new RequestError("Ulasan hanya dapat dibuat oleh pelanggan setelah penyerahan pesanan.", 403);
   }
 
   const keys = operation === "update" ? normalizeKeys(resource, body.keys) : [];
+  if (resource === "payments") {
+    if (operation !== "update") throw new RequestError("Pembayaran dibuat melalui proses checkout.", 403);
+    return updatePayment(keys, values);
+  }
+  if (resource === "production") {
+    if (operation === "create") return createProduction(values, user);
+    return updateProduction(keys, values, user);
+  }
+  if (resource === "handover") {
+    if (operation !== "update") throw new RequestError("Data penyerahan dibuat bersama pesanan saat checkout.", 403);
+    return updateHandover(keys, values);
+  }
   if (
     (resource === "customers" || resource === "users") &&
     typeof values.email === "string"
@@ -520,10 +646,7 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
   const setClause = updatedFields
     .map((field, index) => `"${field}" = $${index + 1}`)
     .join(", ");
-  const scopeClause = user.role === "EMPLOYEE" && resource === "production"
-    ? ` AND "id_karyawan" = $${updatedFields.length + keys.length + 1}`
-    : "";
-  const whereClause = `${keyWhere(resource, updatedFields.length + 1)}${scopeClause}`;
+  const whereClause = keyWhere(resource, updatedFields.length + 1);
   const result = await query(prisma,
     `UPDATE ${definition.table}
      SET ${setClause}
@@ -532,7 +655,6 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
     [
       ...updatedFields.map((field) => values[field]),
       ...keys,
-      ...(scopeClause ? [user.id] : []),
     ],
   );
   if (result.rowCount === 0) {
@@ -544,10 +666,6 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
 async function deleteRecord(resource: ResourceKey, body: unknown) {
   const keys = normalizeKeys(resource, body);
   const definition = queries[resource];
-
-  if (resource === "order-details") {
-    return inTransaction((client) => detailDelete(client, keys));
-  }
 
   const result = await query(prisma,
     `DELETE FROM ${definition.table}
@@ -622,8 +740,8 @@ export async function PUT(
     const body = await requestBody(request);
     if (user.role === "EMPLOYEE") {
       const values = isRecord(body.values) ? Object.keys(body.values) : [];
-      if (!values.length || values.some((field) => !["status_produksi", "tanggal_selesai_produksi"].includes(field))) {
-        throw new RequestError("Karyawan hanya dapat memperbarui status dan tanggal selesai produksi.", 403);
+      if (!values.length || values.some((field) => !["status_produksi", "tanggal_mulai_produksi", "tanggal_selesai_produksi"].includes(field))) {
+        throw new RequestError("Karyawan hanya dapat memperbarui status dan tanggal produksi.", 403);
       }
     }
     const result = await saveRecord(resource, "update", body, user);
@@ -643,6 +761,12 @@ export async function DELETE(
     const user = await getCurrentUser();
     if (!user) throw new RequestError("Silakan masuk terlebih dahulu.", 401);
     assertCanAccess(user, resource, "DELETE");
+    if (["orders", "order-details", "payments", "production", "handover", "reviews"].includes(resource)) {
+      throw new RequestError("Data transaksi dan riwayat operasional tidak dapat dihapus.", 403);
+    }
+    if (resource === "users" && user.role === "ADMIN") {
+      throw new RequestError("Admin tidak dapat menghapus akun pengguna.", 403);
+    }
     const result = await deleteRecord(resource, await requestBody(request));
     return NextResponse.json(result);
   } catch (error) {
@@ -667,7 +791,7 @@ async function createCustomerReview(user: AuthUser, body: unknown) {
     throw new RequestError("Ulasan wajib diisi dan maksimal 255 karakter.");
   }
   return inTransaction(async (client) => {
-    await client.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${orderNumber.trim()}))`);
+    await client.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${orderNumber.trim()}))`);
     const order = await query(client,
       `SELECT 1 FROM "Pesanan" p
        JOIN "Penyerahan" h ON h.no_pesanan = p.no_pesanan AND h.status_penyerahan = 'Diserahkan'

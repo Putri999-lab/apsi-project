@@ -41,6 +41,8 @@ model Produk {
   stok_minimum    Int
   stok_produk     Int?
   harga_produk    Decimal?        @db.Decimal(19, 0)
+  deskripsi_produk String?        @db.VarChar(255)
+  url_gambar      String?         @db.VarChar(500)
   detailPesanan   DetailPesanan[]
 }
 
@@ -79,6 +81,7 @@ model Pembayaran {
   jumlah_bayar      Decimal  @db.Decimal(19, 0)
   tanggal_bayar     DateTime @db.Date
   status_pembayaran String   @db.VarChar(10)
+  bukti_pembayaran_url String? @db.VarChar(500)
   pesanan           Pesanan  @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 }
 

@@ -62,6 +62,7 @@ const tableColumns: Record<ResourceKey, string[]> = {
     "jumlah_bayar",
     "tanggal_bayar",
     "status_pembayaran",
+    "bukti_pembayaran_url",
   ],
   production: [
     "id_produksi",
@@ -122,6 +123,7 @@ const labels: Record<string, string> = {
   jumlah_bayar: "Jumlah bayar",
   tanggal_bayar: "Tanggal bayar",
   status_pembayaran: "Status pembayaran",
+  bukti_pembayaran_url: "Bukti pembayaran",
   id_produksi: "ID produksi",
   status_produksi: "Status produksi",
   tanggal_mulai_produksi: "Tanggal mulai",
@@ -193,9 +195,20 @@ function optionText(resource: ResourceKey, row: Row) {
   }
 }
 
-function optionRows(field: FormField, records: Records) {
+function optionRows(field: FormField, records: Records, currentValue = "") {
   if (!field.reference) return [];
-  const rows = records[field.reference];
+  let rows = records[field.reference];
+  if (field.reference === "orders" && field.name === "no_pesanan") {
+    const available = rows.filter((row) =>
+      row.status_pesanan === "Diproses" &&
+      !records.production.some((production) => production.no_pesanan === row.no_pesanan),
+    );
+    if (currentValue && !available.some((row) => row.no_pesanan === currentValue)) {
+      const current = rows.find((row) => row.no_pesanan === currentValue);
+      if (current) available.push(current);
+    }
+    rows = available;
+  }
   if (field.reference === "users" && field.name === "id_admin") {
     return rows.filter((row) => row.peran === "Owner" || row.peran === "Admin");
   }
@@ -216,27 +229,66 @@ function fieldValue(field: FormField, row?: Row) {
 }
 
 function fieldInputType(field: FormField) {
-  if (field.kind === "email" || field.kind === "password" || field.kind === "date") {
+  if (field.kind === "email" || field.kind === "password" || field.kind === "date" || field.kind === "url") {
     return field.kind;
   }
   if (field.kind === "number" || field.kind === "money") return "number";
   return "text";
 }
 
-function filteredRows(rows: Row[], query: string) {
+const statusFields: Partial<Record<ResourceKey, string>> = {
+  orders: "status_pesanan",
+  payments: "status_pembayaran",
+  production: "status_produksi",
+  handover: "status_penyerahan",
+};
+
+const dateFields: Partial<Record<ResourceKey, string>> = {
+  orders: "tanggal_pesanan",
+  payments: "tanggal_bayar",
+  production: "tanggal_mulai_produksi",
+  handover: "tanggal_penyerahan",
+};
+
+function filteredRows(
+  rows: Row[],
+  query: string,
+  resource: ResourceKey,
+  status: string,
+  fromDate: string,
+  toDate: string,
+) {
   const needle = query.trim().toLocaleLowerCase("id");
-  if (!needle) return rows;
-  return rows.filter((row) =>
-    Object.values(row).some((value) => String(value ?? "").toLocaleLowerCase("id").includes(needle)),
-  );
+  const statusField = statusFields[resource];
+  const dateField = dateFields[resource];
+  return rows.filter((row) => {
+    const matchesSearch = !needle ||
+      Object.values(row).some((value) => String(value ?? "").toLocaleLowerCase("id").includes(needle));
+    const matchesStatus = !status || !statusField || String(row[statusField] ?? "") === status;
+    const date = dateField ? String(row[dateField] ?? "").slice(0, 10) : "";
+    const matchesDate = (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
+    return matchesSearch && matchesStatus && matchesDate;
+  });
 }
 
 function isLowStock(row: Row) {
   return (
     typeof row.stok_produk === "number" &&
     typeof row.stok_minimum === "number" &&
-    row.stok_produk < row.stok_minimum
+    row.stok_produk <= row.stok_minimum
   );
+}
+
+function canCreate(resource: ResourceKey) {
+  return ["customers", "users", "products", "production"].includes(resource);
+}
+
+function canEdit(resource: ResourceKey) {
+  return ["customers", "users", "products", "payments", "production", "handover"].includes(resource);
+}
+
+function canDelete(resource: ResourceKey) {
+  return ["customers", "products"].includes(resource);
 }
 
 export default function Home() {
@@ -245,6 +297,9 @@ export default function Home() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -298,9 +353,14 @@ export default function Home() {
   }, []);
 
   const current = resources[activeResource];
+  const statusOptions = [...new Set(
+    records[activeResource]
+      .map((row) => statusFields[activeResource] ? String(row[statusFields[activeResource]!] ?? "") : "")
+      .filter(Boolean),
+  )].sort();
   const rows = useMemo(
-    () => filteredRows(records[activeResource], search),
-    [activeResource, records, search],
+    () => filteredRows(records[activeResource], search, activeResource, statusFilter, fromDate, toDate),
+    [activeResource, fromDate, records, search, statusFilter, toDate],
   );
 
   function openDialog(nextDialog: Exclude<DialogState, null>) {
@@ -308,6 +368,9 @@ export default function Home() {
     const values: Record<string, string> = {};
     for (const field of resources[nextDialog.resource].fields) {
       values[field.name] = fieldValue(field, row);
+    }
+    if (nextDialog.kind === "create" && nextDialog.resource === "users") {
+      values.peran = "Karyawan";
     }
     if (nextDialog.kind === "edit") {
       for (const field of resources[nextDialog.resource].fields) {
@@ -326,13 +389,16 @@ export default function Home() {
     setError("");
 
     const definition = resources[dialog.resource];
-    const values: Record<string, string | number> = {};
+    const values: Record<string, string | number | null> = {};
     for (const field of definition.fields) {
       if (dialog.kind === "edit" && definition.idFields.includes(field.name)) continue;
+      if (dialog.kind === "edit" && dialog.resource === "users" && field.name === "peran") continue;
+      if (dialog.kind === "edit" && dialog.resource === "payments" && field.name === "bukti_pembayaran_url") continue;
+      if (dialog.resource === "payments" && field.name !== "status_pembayaran") continue;
       const value = formValues[field.name] ?? "";
       if (field.kind === "password" && dialog.kind === "edit" && value === "") continue;
       if (field.kind === "number") {
-        values[field.name] = Number(value);
+        values[field.name] = value === "" && !field.required ? null : Number(value);
       } else {
         values[field.name] = value;
       }
@@ -414,6 +480,10 @@ export default function Home() {
     const value = formValues[field.name] ?? "";
     const editing = dialog?.kind === "edit";
     const lockedKey = editing && current.idFields.includes(field.name);
+    const lockedPaymentProof = editing && dialog?.resource === "payments" && field.name !== "status_pembayaran";
+    const lockedProductionStatus = editing && dialog?.resource === "production" && field.name === "status_produksi";
+    const lockedProductionOrder = editing && dialog?.resource === "production" && field.name === "no_pesanan";
+    const lockedUserRole = editing && dialog?.resource === "users" && field.name === "peran";
     const completionDateRequired =
       dialog?.resource === "production" &&
       field.name === "tanggal_selesai_produksi" &&
@@ -427,7 +497,7 @@ export default function Home() {
       id: `field-${field.name}`,
       name: field.name,
       required,
-      disabled: lockedKey || saving,
+      disabled: lockedKey || lockedPaymentProof || lockedProductionStatus || lockedProductionOrder || lockedUserRole || saving,
       maxLength: field.maxLength,
       min: field.min,
       max: field.max,
@@ -448,7 +518,7 @@ export default function Home() {
             {field.reference ? (
               <>
                 <option value="">Pilih {field.label.toLocaleLowerCase("id")}</option>
-                {optionRows(field, records).map((row) => {
+                {optionRows(field, records, value).map((row) => {
                   const key = row[field.reference === "customers" ? "id_pelanggan" : field.reference === "users" ? "id_pengguna" : field.reference === "products" ? "id_produk" : "no_pesanan"];
                   return (
                     <option key={text(key)} value={text(key)}>
@@ -460,7 +530,10 @@ export default function Home() {
             ) : (
               <>
                 {!field.required && <option value="">Belum selesai</option>}
-                {field.options?.map((option) => (
+                {(dialog?.resource === "users" && field.name === "peran" && dialog.kind === "create"
+                  ? ["Karyawan"]
+                  : [...new Set([value, ...(field.options ?? [])].filter(Boolean))]
+                ).map((option) => (
                   <option key={option} value={option}>
                     {option}
                   </option>
@@ -483,6 +556,12 @@ export default function Home() {
   }
 
   function renderCell(field: string, row: Row) {
+    if (field === "bukti_pembayaran_url") {
+      const proofUrl = row[field];
+      return typeof proofUrl === "string" && proofUrl
+        ? <a href={proofUrl} target="_blank" rel="noreferrer">Lihat bukti</a>
+        : "—";
+    }
     if (field === "subtotal") {
       if (row.harga_satuan == null || row.jumlah == null) return "—";
       try {
@@ -501,7 +580,7 @@ export default function Home() {
       return <span className="badge badge-muted">Belum diatur</span>;
     }
     if (field === "stok_produk" && isLowStock(row)) {
-      return <span className="badge badge-warning">{formattedValue(field, row[field])} · rendah</span>;
+      return <span className="badge badge-warning">{formattedValue(field, row[field])} · terbatas</span>;
     }
     if (field.startsWith("status_")) {
       return <span className="badge badge-status">{formattedValue(field, row[field])}</span>;
@@ -532,6 +611,9 @@ export default function Home() {
               onClick={() => {
                 setActiveResource(resource);
                 setSearch("");
+                setStatusFilter("");
+                setFromDate("");
+                setToDate("");
                 setError("");
               }}
             >
@@ -543,7 +625,7 @@ export default function Home() {
         </nav>
         <div className="sidebar-footer">
           <span className="connection-dot" />
-          <span>PostgreSQL · apsi_db</span>
+          <span>PostgreSQL · database aplikasi</span>
         </div>
       </aside>
 
@@ -564,32 +646,26 @@ export default function Home() {
               <h1>Selamat datang kembali</h1>
               <p className="welcome-subtitle">Kelola pesanan, produksi, dan penjualan dalam satu tempat.</p>
             </div>
-            <button className="button button-primary" onClick={() => openDialog({ kind: "create", resource: activeResource })}>
-              <span className="button-plus">+</span> Tambah {current.title}
-            </button>
+            {canCreate(activeResource) && (
+              <button className="button button-primary" onClick={() => openDialog({ kind: "create", resource: activeResource })}>
+                <span className="button-plus">+</span> Tambah {current.title}
+              </button>
+            )}
           </div>
 
           <div className="summary-grid">
-            <div className="summary-card">
-              <span className="summary-label">Total pesanan</span>
-              <strong>{records.orders.length}</strong>
-              <span className="summary-foot">terdaftar di sistem</span>
-            </div>
-            <div className="summary-card">
-              <span className="summary-label">Dalam produksi</span>
-              <strong>{records.production.filter((row) => row.status_produksi === "Diproses").length}</strong>
-              <span className="summary-foot">pesanan sedang dikerjakan</span>
-            </div>
-            <div className="summary-card">
-              <span className="summary-label">Produk perlu perhatian</span>
-              <strong>{records.products.filter((row) => row.stok_produk == null || isLowStock(row)).length}</strong>
-              <span className="summary-foot">stok rendah atau belum diatur</span>
-            </div>
-            <div className="summary-card summary-card-accent">
-              <span className="summary-label">Pelanggan</span>
-              <strong>{records.customers.length}</strong>
-              <span className="summary-foot">pelanggan terdaftar</span>
-            </div>
+            <SummaryCard label="Pelanggan" value={records.customers.length} foot="terdaftar" />
+            <SummaryCard label="Admin" value={records.users.filter((row) => String(row.peran).toLocaleLowerCase("id") === "admin").length} foot="akun aktif" />
+            <SummaryCard label="Karyawan produksi" value={records.users.filter((row) => ["employee", "karyawan"].includes(String(row.peran).toLocaleLowerCase("id"))).length} foot="akun aktif" />
+            <SummaryCard label="Owner" value={records.users.filter((row) => String(row.peran).toLocaleLowerCase("id") === "owner").length} foot="akun aktif" />
+            <SummaryCard label="Produk" value={records.products.length} foot="produk terdaftar" accent />
+            <SummaryCard label="Pesanan menunggu" value={records.orders.filter((row) => row.status_pesanan === "Baru").length} foot="menunggu pembayaran" />
+            <SummaryCard label="Pembayaran menunggu" value={records.payments.filter((row) => ["Menunggu", "Konfirmasi"].includes(String(row.status_pembayaran))).length} foot="perlu verifikasi" />
+            <SummaryCard label="Dalam produksi" value={records.production.filter((row) => ["Menunggu", "Diproses"].includes(String(row.status_produksi))).length} foot="pekerjaan aktif" />
+            <SummaryCard label="Produksi selesai" value={records.production.filter((row) => row.status_produksi === "Selesai").length} foot="siap dipantau untuk penyerahan" />
+            <SummaryCard label="Sudah diserahkan" value={records.handover.filter((row) => row.status_penyerahan === "Diserahkan").length} foot="pesanan terserahterimakan" />
+            <SummaryCard label="Stok perlu perhatian" value={records.products.filter((row) => row.stok_produk == null || isLowStock(row)).length} foot="belum tersedia atau rendah" />
+            <SummaryCard label="Total pesanan" value={records.orders.length} foot="semua status" />
           </div>
 
           {(error || notice) && (
@@ -631,6 +707,21 @@ export default function Home() {
                   aria-label={`Cari ${current.title}`}
                 />
               </label>
+              {statusFields[activeResource] && (
+                <label className="form-field">
+                  <span>Filter status</span>
+                  <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                    <option value="">Semua status</option>
+                    {statusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+                  </select>
+                </label>
+              )}
+              {dateFields[activeResource] && (
+                <>
+                  <label className="form-field"><span>Dari tanggal</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+                  <label className="form-field"><span>Sampai tanggal</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+                </>
+              )}
               <span className="record-count">{rows.length} data</span>
             </div>
 
@@ -664,8 +755,12 @@ export default function Home() {
                         <td>
                           <div className="row-actions">
                             <button className="action-button" onClick={() => openDialog({ kind: "detail", resource: activeResource, row })}>Detail</button>
-                            <button className="action-button" onClick={() => openDialog({ kind: "edit", resource: activeResource, row })}>Edit</button>
-                            <button className="action-button action-delete" onClick={() => void deleteRow(activeResource, row)}>Hapus</button>
+                            {canEdit(activeResource) && (
+                              <button className="action-button" onClick={() => openDialog({ kind: "edit", resource: activeResource, row })}>Edit</button>
+                            )}
+                            {canDelete(activeResource) && (
+                              <button className="action-button action-delete" onClick={() => void deleteRow(activeResource, row)}>Hapus</button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -738,12 +833,24 @@ export default function Home() {
             {dialog.kind === "detail" && (
               <div className="form-actions detail-actions">
                 <button className="button button-secondary" onClick={() => setDialog(null)}>Tutup</button>
-                <button className="button button-primary" onClick={() => openDialog({ kind: "edit", resource: dialog.resource, row: dialog.row })}>Edit data</button>
+                {canEdit(dialog.resource) && (
+                  <button className="button button-primary" onClick={() => openDialog({ kind: "edit", resource: dialog.resource, row: dialog.row })}>Edit data</button>
+                )}
               </div>
             )}
           </section>
         </div>
       )}
     </main>
+  );
+}
+
+function SummaryCard({ label, value, foot, accent = false }: { label: string; value: React.ReactNode; foot: string; accent?: boolean }) {
+  return (
+    <div className={`summary-card ${accent ? "summary-card-accent" : ""}`}>
+      <span className="summary-label">{label}</span>
+      <strong>{value}</strong>
+      <span className="summary-foot">{foot}</span>
+    </div>
   );
 }

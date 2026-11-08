@@ -32,10 +32,14 @@
       EMPLOYEE_REGISTRATION_CODE: ${EMPLOYEE_REGISTRATION_CODE:-}
       OWNER_REGISTRATION_CODE: ${OWNER_REGISTRATION_CODE:-}
       ADMIN_REGISTRATION_CODE: ${ADMIN_REGISTRATION_CODE:-}
+      PAYMENT_PROOF_DIR: /app/.uploads/payment-proofs
       PORT: 3000
+    volumes:
+      - payment_proofs:/app/.uploads/payment-proofs
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   postgres_data:
+  payment_proofs:

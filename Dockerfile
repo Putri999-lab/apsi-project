@@ -41,6 +41,8 @@ COPY --from=builder --chown=nextjs:nodejs /workspace/my-app/src/generated/prisma
 COPY --from=builder /workspace/my-app/node_modules ./node_modules
 COPY --from=builder /workspace/my-app/package.json ./package.json
 
+RUN mkdir -p /app/.uploads/payment-proofs && chown -R nextjs:nodejs /app/.uploads
+
 USER nextjs
 
 EXPOSE 3000

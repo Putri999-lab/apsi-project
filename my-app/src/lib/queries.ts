@@ -34,7 +34,8 @@ export const queries: Record<ResourceKey, QueryDefinition> = {
     alias: "pr",
     keyFields: ["id_produk"],
     select: `SELECT pr.id_produk, pr.nama_produk, pr.kategori_produk, pr.satuan_produk,
-                    pr.harga_produk, pr.stok_minimum, pr.stok_produk
+                    pr.harga_produk, pr.stok_minimum, pr.stok_produk,
+                    pr.deskripsi_produk, pr.url_gambar
              FROM "Produk" pr`,
     orderBy: "pr.id_produk",
   },
@@ -54,7 +55,8 @@ export const queries: Record<ResourceKey, QueryDefinition> = {
     alias: "dp",
     keyFields: ["no_pesanan", "id_produk"],
     select: `SELECT dp.no_pesanan, dp.id_produk, dp.jumlah, dp.harga_satuan,
-                    dp.stok_produk_sebelum, dp.stok_produk_sesudah, pr.nama_produk
+                    dp.stok_produk_sebelum, dp.stok_produk_sesudah, pr.nama_produk,
+                    pr.stok_produk, pr.stok_minimum
              FROM "DetailPesanan" dp
              JOIN "Produk" pr ON pr.id_produk = dp.id_produk`,
     orderBy: "dp.no_pesanan, dp.id_produk",
@@ -64,7 +66,8 @@ export const queries: Record<ResourceKey, QueryDefinition> = {
     alias: "py",
     keyFields: ["id_pembayaran"],
     select: `SELECT py.id_pembayaran, py.no_pesanan, py.metode_pembayaran,
-                    py.jumlah_bayar, py.tanggal_bayar, py.status_pembayaran
+                    py.jumlah_bayar, py.tanggal_bayar, py.status_pembayaran,
+                    py.bukti_pembayaran_url
              FROM "Pembayaran" py`,
     orderBy: "py.tanggal_bayar DESC, py.id_pembayaran",
   },

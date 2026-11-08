@@ -9,4 +9,3 @@ export default async function WorkspacePage() {
   if (user.role !== "ADMIN") redirect("/dashboard");
   return <AdminWorkspace />;
 }
-

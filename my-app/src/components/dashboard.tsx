@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import type { AppRole, AuthUser } from "@/src/lib/auth";
 
@@ -26,7 +27,7 @@ const roleTitles: Record<AppRole, string> = {
 };
 
 const roleMenus: Record<AppRole, string[]> = {
-  CUSTOMER: ["Menu & Pesan", "Pesanan Saya", "Ulasan"],
+  CUSTOMER: ["Menu & Pesan", "Pesanan Saya", "Pembayaran", "Ulasan"],
   EMPLOYEE: ["Daftar Pesanan", "Produksi"],
   OWNER: ["Dashboard", "Laporan", "Ulasan"],
   ADMIN: ["Dashboard"],
@@ -45,14 +46,23 @@ function asText(value: unknown) {
 
 function currency(value: unknown) {
   try {
+    const amount = typeof value === "bigint"
+      ? value
+      : typeof value === "string" && /^-?\d+$/.test(value.trim())
+        ? BigInt(value.trim())
+        : Number(value ?? 0);
     return new Intl.NumberFormat("id-ID", {
       style: "currency",
       currency: "IDR",
       maximumFractionDigits: 0,
-    }).format(Number(value ?? 0));
+    }).format(amount);
   } catch {
     return "Rp0";
   }
+}
+
+function productPrice(value: unknown) {
+  return value == null ? "Harga belum diatur" : currency(value);
 }
 
 function dateLabel(value: unknown) {
@@ -66,6 +76,7 @@ function dateLabel(value: unknown) {
 function sectionFor(role: AppRole, menu: string): Resource | "overview" | "reports" {
   if (role === "CUSTOMER") {
     if (menu === "Pesanan Saya") return "orders";
+    if (menu === "Pembayaran") return "payments";
     if (menu === "Ulasan") return "reviews";
     return "products";
   }
@@ -179,9 +190,86 @@ export default function Dashboard({ user }: { user: AuthUser }) {
       );
       setCart({});
       setNotice("Pesanan berhasil dibuat. Lihat statusnya di Pesanan Saya.");
+      setActiveMenu("Pembayaran");
       await loadData();
     } catch (orderError) {
       setError(orderError instanceof Error ? orderError.message : "Pesanan tidak dapat dibuat.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelOrder(orderNumber: string) {
+    if (!window.confirm(`Batalkan pesanan ${orderNumber}? Stok akan dikembalikan jika pesanan belum diproses.`)) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/customer/orders/${encodeURIComponent(orderNumber)}/cancel`, {
+        method: "POST",
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) throw new Error(
+        typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+          ? result.error
+          : "Pesanan tidak dapat dibatalkan.",
+      );
+      setNotice(`Pesanan ${orderNumber} dibatalkan dan stok telah disesuaikan.`);
+      await loadData();
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Pesanan tidak dapat dibatalkan.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateCustomerPayment(orderNumber: string, method: string, proofFile: File | null, existingProofUrl: string) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      let proofUrl = existingProofUrl;
+      if (proofFile) {
+        const upload = new FormData();
+        upload.set("orderNumber", orderNumber);
+        upload.set("file", proofFile);
+        const uploadResponse = await fetch("/api/customer/payment-proofs", {
+          method: "POST",
+          body: upload,
+        });
+        const uploadResult: unknown = await uploadResponse.json();
+        if (!uploadResponse.ok) throw new Error(
+          typeof uploadResult === "object" && uploadResult !== null &&
+            "error" in uploadResult && typeof uploadResult.error === "string"
+            ? uploadResult.error
+            : "Bukti pembayaran tidak dapat diunggah.",
+        );
+        if (
+          typeof uploadResult !== "object" || uploadResult === null ||
+          !("proofUrl" in uploadResult) || typeof uploadResult.proofUrl !== "string"
+        ) {
+          throw new Error("Respons unggah bukti pembayaran tidak valid.");
+        }
+        proofUrl = uploadResult.proofUrl;
+      }
+
+      const response = await fetch("/api/customer/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderNumber, paymentMethod: method, proofUrl }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) throw new Error(
+        typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+          ? result.error
+          : "Pembayaran tidak dapat diperbarui.",
+      );
+      setNotice(method === "Tunai"
+        ? "Metode tunai disimpan. Pembayaran akan menunggu verifikasi setelah diterima."
+        : "Konfirmasi pembayaran dikirim dan menunggu verifikasi admin.");
+      await loadData();
+    } catch (paymentError) {
+      setError(paymentError instanceof Error ? paymentError.message : "Pembayaran tidak dapat diperbarui.");
     } finally {
       setBusy(false);
     }
@@ -317,15 +405,20 @@ export default function Dashboard({ user }: { user: AuthUser }) {
               paymentMethod={paymentMethod} setPaymentMethod={setPaymentMethod}
               handoverMethod={handoverMethod} setHandoverMethod={setHandoverMethod} onOrder={placeOrder} />
           )}
+          {activeSection === "payments" && user.role === "CUSTOMER" && (
+            <CustomerPayments payments={payments} orders={orders} details={details} loading={loading}
+              busy={busy} onConfirm={updateCustomerPayment} onNavigate={setActiveMenu} />
+          )}
           {activeSection === "orders" && <Orders role={user.role} orders={orders} details={details} payments={payments}
-            handovers={handovers} production={production} loading={loading} onUpdate={updateProduction} busy={busy} />}
+            handovers={handovers} production={production} loading={loading} onUpdate={updateProduction}
+            busy={busy} onNavigate={setActiveMenu} onCancel={cancelOrder} />}
           {activeSection === "production" && <ProductionRows rows={production} orders={orders} details={details}
             loading={loading} onUpdate={updateProduction} busy={busy} />}
           {activeSection === "reviews" && (
             <ReviewPanel role={user.role} reviews={reviews} reviewableOrders={reviewableOrders}
               reviewOrder={reviewOrder} setReviewOrder={setReviewOrder} rating={reviewRating}
               setRating={setReviewRating} text={reviewText} setText={setReviewText}
-              onSubmit={submitReview} busy={busy} />
+              onSubmit={submitReview} busy={busy} onNavigate={setActiveMenu} />
           )}
         </div>
       </section>
@@ -336,6 +429,7 @@ export default function Dashboard({ user }: { user: AuthUser }) {
 function headingDescription(role: AppRole, section: string) {
   if (role === "CUSTOMER") {
     if (section === "orders") return "Lihat perkembangan, pembayaran, dan penyerahan pesanan Anda.";
+    if (section === "payments") return "Tinjau tagihan dan status verifikasi pembayaran setiap pesanan.";
     if (section === "reviews") return "Bagikan pengalaman setelah pesanan diterima.";
     return "Pilih menu favorit dan pesan langsung dari Dapur Abita.";
   }
@@ -379,7 +473,7 @@ function Overview({ role, products, orders, payments, production, sales, loading
           <div className="role-mini-grid">{products.slice(0, 4).map((product) =>
             <div className="role-product-mini" key={asText(product.id_produk)}>
               <span>{asText(product.kategori_produk)}</span><strong>{asText(product.nama_produk)}</strong>
-              <small>{currency(product.harga_produk)}</small>
+              <small>{productPrice(product.harga_produk)}</small>
             </div>)}
           </div>
         </section>
@@ -400,7 +494,7 @@ function CustomerMenu({ products, cart, setCart, busy, paymentMethod, setPayment
   busy: boolean; paymentMethod: string; setPaymentMethod: (value: string) => void;
   handoverMethod: string; setHandoverMethod: (value: string) => void; onOrder: () => void;
 }) {
-  const items = products.filter((product) => Number(product.stok_produk ?? 0) > 0);
+  const items = products;
   const total = items.reduce((sum, product) => sum + BigInt(String(product.harga_produk ?? 0)) *
     BigInt(cart[asText(product.id_produk)] ?? 0), BigInt(0));
   return (
@@ -409,17 +503,37 @@ function CustomerMenu({ products, cart, setCart, busy, paymentMethod, setPayment
         {items.map((product) => {
           const id = asText(product.id_produk);
           const count = cart[id] ?? 0;
+          const available = product.harga_produk != null && product.stok_produk != null &&
+            Number(product.stok_produk) > 0;
+          const lowStock = available && product.stok_minimum != null &&
+            Number(product.stok_produk) <= Number(product.stok_minimum);
+          const availability = product.harga_produk == null || product.stok_produk == null
+            ? "Belum tersedia untuk dipesan"
+              : available
+                ? `${lowStock ? "Stok terbatas" : "Tersedia"} · sisa stok ${asText(product.stok_produk)}`
+                : "Stok habis";
+          const imageUrl = typeof product.url_gambar === "string" ? product.url_gambar : "";
           return <article className="role-product-card" key={id}>
-            <div className="role-product-art"><span>{asText(product.kategori_produk).slice(0, 1)}</span></div>
+            <div className="role-product-art">
+              {imageUrl
+                ? <Image src={imageUrl} alt={asText(product.nama_produk)} width={520} height={300} unoptimized />
+                : <span aria-label="Foto produk belum tersedia">{asText(product.kategori_produk).slice(0, 1)}</span>}
+            </div>
             <div className="role-product-info">
               <small>{asText(product.kategori_produk)} · {asText(product.satuan_produk)}</small>
-              <h2>{asText(product.nama_produk)}</h2><strong>{currency(product.harga_produk)}</strong>
-              <small>Sisa stok {asText(product.stok_produk)}</small>
+              <h2>{asText(product.nama_produk)}</h2>
+              {typeof product.deskripsi_produk === "string" && product.deskripsi_produk
+                ? <p className="role-product-description">{product.deskripsi_produk}</p>
+                : <p className="role-product-description unavailable">Deskripsi belum tersedia.</p>}
+              <strong>{productPrice(product.harga_produk)}</strong>
+              <small className={`role-stock-indicator ${!available ? "out" : lowStock ? "low" : "available"}`}>
+                {availability}
+              </small>
               <div className="role-quantity">
-                <button aria-label={`Kurangi ${asText(product.nama_produk)}`} onClick={() =>
+                <button aria-label={`Kurangi ${asText(product.nama_produk)}`} disabled={busy || count === 0} onClick={() =>
                   setCart((current) => ({ ...current, [id]: Math.max(0, count - 1) }))}>−</button>
                 <span>{count}</span>
-                <button aria-label={`Tambah ${asText(product.nama_produk)}`} onClick={() =>
+                <button aria-label={`Tambah ${asText(product.nama_produk)}`} disabled={busy || !available || count >= Number(product.stok_produk)} onClick={() =>
                   setCart((current) => ({ ...current, [id]: Math.min(Number(product.stok_produk), count + 1) }))}>+</button>
               </div>
             </div>
@@ -427,9 +541,31 @@ function CustomerMenu({ products, cart, setCart, busy, paymentMethod, setPayment
         })}
         {!items.length && <EmptyState text="Belum ada produk dengan stok yang tersedia." />}
       </div>
+      {items.length > 0 && !items.some((product) =>
+        product.harga_produk != null && product.stok_produk != null && Number(product.stok_produk) > 0) && (
+        <p className="role-catalog-note" role="status">
+          Belum ada produk yang siap dipesan. Harga dan stok perlu diisi dari data produk sebelum checkout tersedia.
+        </p>
+      )}
       {total > BigInt(0) && <section className="role-panel role-checkout" id="customer-checkout">
         <div className="role-panel-head"><div><span className="role-eyebrow">CHECKOUT</span><h2>Keranjang pesanan</h2></div>
           <strong>{currency(total)}</strong></div>
+        <div className="role-cart-lines">
+          {items.filter((product) => (cart[asText(product.id_produk)] ?? 0) > 0).map((product) => {
+            const id = asText(product.id_produk);
+            const quantity = cart[id] ?? 0;
+            return <div className="role-cart-line" key={id}>
+              <span>{asText(product.nama_produk)} × {quantity}</span>
+              <strong>{currency(BigInt(String(product.harga_produk ?? 0)) * BigInt(quantity))}</strong>
+              <button type="button" disabled={busy} onClick={() => setCart((current) => {
+                const next = { ...current };
+                delete next[id];
+                return next;
+              })}>Hapus</button>
+            </div>;
+          })}
+          <div className="role-cart-total"><span>Subtotal dan total</span><strong>{currency(total)}</strong></div>
+        </div>
         <div className="role-checkout-grid">
           <label>Metode pembayaran<select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value)}>
             <option>QRIS</option><option>Transfer</option><option>Tunai</option>
@@ -446,15 +582,22 @@ function CustomerMenu({ products, cart, setCart, busy, paymentMethod, setPayment
   );
 }
 
-function Orders({ role, orders, details, payments, handovers, production, loading, onUpdate, busy }: {
+function Orders({ role, orders, details, payments, handovers, production, loading, onUpdate, busy, onNavigate, onCancel }: {
   role: AppRole; orders: Row[]; details: Row[]; payments: Row[]; handovers: Row[];
   production: Row[]; loading: boolean; onUpdate: (row: Row, status: string) => void; busy: boolean;
+  onNavigate: (menu: string) => void; onCancel: (orderNumber: string) => void;
 }) {
   if (loading) return <LoadingState />;
-  if (!orders.length) return <EmptyState text="Belum ada pesanan untuk ditampilkan." />;
+  if (!orders.length) return <section className="role-empty role-empty-action">
+    <strong>{role === "CUSTOMER" ? "Belum ada pesanan untuk ditampilkan." : "Belum ada pesanan yang dapat ditampilkan."}</strong>
+    {role === "CUSTOMER" && <span>Mulai pilih produk untuk membuat pesanan pertama Anda.</span>}
+    {role === "CUSTOMER" && <button className="role-primary-button" onClick={() => onNavigate("Menu & Pesan")}>Buka Menu &amp; Pesan</button>}
+  </section>;
   return <div className="role-order-list">{orders.map((order) => {
     const number = asText(order.no_pesanan);
     const orderDetails = details.filter((detail) => detail.no_pesanan === order.no_pesanan);
+    const orderTotal = orderDetails.reduce((sum, detail) =>
+      sum + BigInt(String(detail.harga_satuan ?? 0)) * BigInt(Number(detail.jumlah ?? 0)), BigInt(0));
     const payment = payments.find((row) => row.no_pesanan === order.no_pesanan);
     const handover = handovers.find((row) => row.no_pesanan === order.no_pesanan);
     const productionRow = production.find((row) => row.no_pesanan === order.no_pesanan);
@@ -465,17 +608,194 @@ function Orders({ role, orders, details, payments, handovers, production, loadin
         <div key={`${number}-${asText(detail.id_produk)}`}><span>{asText(detail.nama_produk)} × {asText(detail.jumlah)}</span>
           <span>{currency(BigInt(String(detail.harga_satuan ?? 0)) * BigInt(Number(detail.jumlah ?? 0)))}</span></div>)}
       </div>
+      {role === "CUSTOMER" && <div className="role-payment-total"><span>Total pesanan</span><strong>{currency(orderTotal)}</strong></div>}
       <div className="role-order-meta">
-        {payment && <span>Pembayaran <Status value={payment.status_pembayaran} /></span>}
+        {role === "CUSTOMER" && <span>Pembayaran <Status value={payment?.status_pembayaran ?? "Belum dibuat"} /></span>}
         {handover && <span>Penyerahan <Status value={handover.status_penyerahan} /></span>}
         {productionRow && <span>Produksi <Status value={productionRow.status_produksi} /></span>}
       </div>
+      {role === "CUSTOMER" && <details className="role-order-details">
+        <summary>Lihat detail dan progres pesanan</summary>
+        <OrderProgress order={order} production={productionRow} handover={handover} payment={payment} />
+      </details>}
+      {role === "CUSTOMER" && !payment && order.status_pesanan !== "Dibatalkan" && (
+        <button className="role-small-button" onClick={() => onNavigate("Pembayaran")}>
+          Lanjutkan pembayaran
+        </button>
+      )}
+      {role === "CUSTOMER" && order.status_pesanan === "Baru" &&
+        (!payment || ["Menunggu", "Ditolak", "Gagal"].includes(String(payment.status_pembayaran))) && (
+        <button className="role-small-button" disabled={busy} onClick={() => onCancel(number)}>
+          Batalkan pesanan
+        </button>
+      )}
       {role === "EMPLOYEE" && productionRow && productionRow.status_produksi !== "Selesai" &&
-        <button className="role-small-button" disabled={busy} onClick={() => onUpdate(productionRow, "Selesai")}>
-          Tandai produksi selesai
-        </button>}
+        <>
+          <div className="role-order-lines role-stock-production">{orderDetails.map((detail) => (
+            <div key={`stock-${number}-${asText(detail.id_produk)}`}>
+              <span>Stok {asText(detail.nama_produk)}: {asText(detail.stok_produk)}</span>
+              <span>{detail.stok_produk == null
+                ? "Belum dicatat"
+                : Number(detail.stok_produk) <= Number(detail.stok_minimum ?? 0)
+                  ? "Stok terbatas"
+                  : "Tersedia"}</span>
+            </div>
+          ))}</div>
+          <button className="role-small-button" disabled={busy} onClick={() => onUpdate(productionRow, "Selesai")}>
+            Tandai produksi selesai
+          </button>
+        </>}
     </article>;
   })}</div>;
+}
+
+function OrderProgress({ order, production, handover, payment }: {
+  order: Row; production?: Row; handover?: Row; payment?: Row;
+}) {
+  const handedOver = handover?.status_penyerahan === "Diserahkan";
+  const productionComplete = production?.status_produksi === "Selesai" || order.status_pesanan === "Selesai";
+  const processing = order.status_pesanan === "Diproses" || Boolean(production);
+  const activeStep = handedOver ? 3 : productionComplete ? 2 : processing ? 1 : 0;
+  const steps = ["Menunggu konfirmasi", "Diproses", "Selesai", "Diserahkan"];
+  return <div className="role-progress">
+    <ol>{steps.map((step, index) => <li className={index <= activeStep ? "complete" : ""} key={step}>
+      <span>{index < activeStep ? "✓" : index + 1}</span><small>{step}</small>
+    </li>)}</ol>
+    {order.status_pesanan === "Dibatalkan" && <p className="role-progress-note">Pesanan dibatalkan.</p>}
+    {payment?.status_pembayaran === "Ditolak" || payment?.status_pembayaran === "Gagal"
+      ? <p className="role-progress-note">Pembayaran perlu diperiksa kembali sebelum pesanan diproses.</p>
+      : null}
+  </div>;
+}
+
+function CustomerPayments({ payments, orders, details, loading, busy, onConfirm, onNavigate }: {
+  payments: Row[]; orders: Row[]; details: Row[]; loading: boolean; busy: boolean;
+  onConfirm: (orderNumber: string, method: string, proofFile: File | null, proofUrl: string) => void;
+  onNavigate: (menu: string) => void;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, { method: string; proofFile: File | null }>>({});
+  const ordersWithoutPayment = orders.filter((order) =>
+    order.status_pesanan !== "Dibatalkan" &&
+    !payments.some((payment) => payment.no_pesanan === order.no_pesanan));
+  if (loading) return <LoadingState />;
+  if (!payments.length && !ordersWithoutPayment.length) return <section className="role-empty role-empty-action">
+    <strong>Belum ada tagihan.</strong>
+    <span>Tagihan akan muncul setelah Anda membuat pesanan.</span>
+    <button className="role-primary-button" onClick={() => onNavigate("Menu & Pesan")}>Buka Menu &amp; Pesan</button>
+  </section>;
+
+  return <div className="role-order-list">{payments.map((payment) => {
+    const number = asText(payment.no_pesanan);
+    const order = orders.find((row) => row.no_pesanan === number);
+    const lines = details.filter((row) => row.no_pesanan === number);
+    const total = lines.reduce((sum, line) =>
+      sum + BigInt(String(line.harga_satuan ?? 0)) * BigInt(Number(line.jumlah ?? 0)), BigInt(0));
+    const draft = drafts[number] ?? {
+      method: asText(payment.metode_pembayaran),
+      proofFile: null,
+    };
+    const proofUrl = typeof payment.bukti_pembayaran_url === "string" ? payment.bukti_pembayaran_url : "";
+    const reusableProofUrl = /^\/api\/customer\/payment-proofs\/[a-f0-9]{32}\.(?:jpg|png|webp|pdf)$/.test(proofUrl)
+      ? proofUrl
+      : "";
+    const verified = payment.status_pembayaran === "Berhasil";
+    const awaitingVerification = payment.status_pembayaran === "Konfirmasi";
+    const rejected = payment.status_pembayaran === "Ditolak" || payment.status_pembayaran === "Gagal";
+
+    return <article className="role-order-card role-payment-card" key={asText(payment.id_pembayaran)}>
+      <div className="role-order-head">
+        <div><span>Tagihan pesanan {number}</span><small>{dateLabel(order?.tanggal_pesanan ?? payment.tanggal_bayar)}</small></div>
+        <Status value={payment.status_pembayaran} />
+      </div>
+      <div className="role-order-lines">{lines.map((line) => <div key={asText(line.id_produk)}>
+        <span>{asText(line.nama_produk)} × {asText(line.jumlah)}</span>
+        <span>{currency(BigInt(String(line.harga_satuan ?? 0)) * BigInt(Number(line.jumlah ?? 0)))}</span>
+      </div>)}</div>
+      <div className="role-payment-total"><span>Total tagihan</span><strong>{currency(total || payment.jumlah_bayar)}</strong></div>
+      <label className="role-payment-method">Metode pembayaran
+        <select value={draft.method} disabled={verified || awaitingVerification || busy}
+          onChange={(event) => setDrafts((current) => ({
+            ...current, [number]: { ...draft, method: event.target.value },
+          }))}>
+          <option value="Transfer">Transfer</option><option value="QRIS">QRIS</option><option value="Tunai">Tunai</option>
+        </select>
+      </label>
+      {draft.method !== "Tunai" && !verified && !awaitingVerification && (
+        <label className="role-payment-method">Unggah bukti {draft.method === "QRIS" ? "pembayaran QRIS" : "transfer"}
+          <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf"
+            onChange={(event) => setDrafts((current) => ({
+              ...current, [number]: { ...draft, proofFile: event.target.files?.[0] ?? null },
+            }))} />
+          <small>Format JPG, PNG, WebP, atau PDF; ukuran maksimal 5 MB.
+            {draft.proofFile
+              ? ` Dipilih: ${draft.proofFile.name}`
+              : reusableProofUrl
+                ? " Bukti sebelumnya akan digunakan jika tidak memilih file baru."
+                : proofUrl
+                  ? " Unggah ulang bukti sebelum mengirim konfirmasi baru."
+                  : ""}
+          </small>
+        </label>
+      )}
+      {proofUrl && (
+        <a className="role-proof-link" href={proofUrl} target="_blank" rel="noreferrer">Lihat bukti pembayaran</a>
+      )}
+      {awaitingVerification && <p className="role-payment-note">Konfirmasi diterima dan menunggu verifikasi admin. Pembayaran belum dinyatakan berhasil.</p>}
+      {draft.method === "Tunai" && !verified && <p className="role-payment-note">Pembayaran tunai baru dinyatakan berhasil setelah diterima dan diverifikasi petugas.</p>}
+      {!verified && !awaitingVerification && (
+        <button className="role-primary-button" disabled={busy ||
+          (draft.method !== "Tunai" && !draft.proofFile && !reusableProofUrl)}
+          onClick={() => onConfirm(number, draft.method, draft.method === "Tunai" ? null : draft.proofFile, draft.method === "Tunai" ? "" : reusableProofUrl)}>
+          {draft.method === "Tunai" ? "Simpan metode tunai" : rejected ? "Kirim ulang konfirmasi" : "Konfirmasi pembayaran"}
+        </button>
+      )}
+      {verified && <p className="role-payment-note success">Pembayaran sudah diverifikasi.</p>}
+    </article>;
+  })}
+  {ordersWithoutPayment.map((order) => {
+    const number = asText(order.no_pesanan);
+    const lines = details.filter((row) => row.no_pesanan === number);
+    const total = lines.reduce((sum, line) =>
+      sum + BigInt(String(line.harga_satuan ?? 0)) * BigInt(Number(line.jumlah ?? 0)), BigInt(0));
+    const draft = drafts[number] ?? { method: "Transfer", proofFile: null };
+    return <article className="role-order-card role-payment-card" key={`missing-${number}`}>
+      <div className="role-order-head">
+        <div><span>Pesanan {number}</span><small>{dateLabel(order.tanggal_pesanan)}</small></div>
+        <Status value="Belum dibuat" />
+      </div>
+      <div className="role-order-lines">{lines.map((line) => <div key={asText(line.id_produk)}>
+        <span>{asText(line.nama_produk)} × {asText(line.jumlah)}</span>
+        <span>{currency(BigInt(String(line.harga_satuan ?? 0)) * BigInt(Number(line.jumlah ?? 0)))}</span>
+      </div>)}</div>
+      <div className="role-payment-total"><span>Total tagihan</span><strong>{currency(total)}</strong></div>
+      <p className="role-payment-note">Pesanan ini belum memiliki catatan pembayaran. Tagihan akan dihitung dari rincian pesanan.</p>
+      <label className="role-payment-method">Metode pembayaran
+        <select value={draft.method} disabled={busy}
+          onChange={(event) => setDrafts((current) => ({
+            ...current, [number]: { ...draft, method: event.target.value },
+          }))}>
+          <option value="Transfer">Transfer</option><option value="QRIS">QRIS</option><option value="Tunai">Tunai</option>
+        </select>
+      </label>
+      {draft.method !== "Tunai" && (
+        <label className="role-payment-method">Unggah bukti {draft.method === "QRIS" ? "pembayaran QRIS" : "transfer"}
+          <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf"
+            onChange={(event) => setDrafts((current) => ({
+              ...current, [number]: { ...draft, proofFile: event.target.files?.[0] ?? null },
+            }))} />
+          <small>Format JPG, PNG, WebP, atau PDF; ukuran maksimal 5 MB.
+            {draft.proofFile ? ` Dipilih: ${draft.proofFile.name}` : ""}
+          </small>
+        </label>
+      )}
+      <button className="role-primary-button" disabled={busy ||
+        (draft.method !== "Tunai" && !draft.proofFile)}
+        onClick={() => onConfirm(number, draft.method, draft.method === "Tunai" ? null : draft.proofFile, "")}>
+        {draft.method === "Tunai" ? "Buat tagihan tunai" : "Unggah bukti dan buat tagihan"}
+      </button>
+    </article>;
+  })}
+  </div>;
 }
 
 function ProductionRows({ rows, orders, details, loading, onUpdate, busy }: {
@@ -529,10 +849,10 @@ function Reports({ products, orders, payments, production }: {
 }
 
 function ReviewPanel({ role, reviews, reviewableOrders, reviewOrder, setReviewOrder,
-  rating, setRating, text, setText, onSubmit, busy }: {
+  rating, setRating, text, setText, onSubmit, busy, onNavigate }: {
   role: AppRole; reviews: Row[]; reviewableOrders: Row[]; reviewOrder: string; setReviewOrder: (value: string) => void;
   rating: string; setRating: (value: string) => void; text: string; setText: (value: string) => void;
-  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; busy: boolean;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; busy: boolean; onNavigate: (menu: string) => void;
 }) {
   return <div className="role-review-layout">
     {role === "CUSTOMER" && <form className="role-panel role-review-form" onSubmit={onSubmit}>
@@ -557,7 +877,11 @@ function ReviewPanel({ role, reviews, reviewableOrders, reviewOrder, setReviewOr
         <div><strong>Pesanan {asText(review.no_pesanan)}</strong><small>{asText(review.nama_pelanggan)} · {dateLabel(review.tanggal_ulasan)}</small></div>
         <span className="role-rating">{"★".repeat(Math.min(5, Number(review.rating)))}{"☆".repeat(Math.max(0, 5 - Number(review.rating)))}</span>
         <p>{asText(review.isi_ulasan)}</p>
-      </article>) : <EmptyState text="Belum ada ulasan." />}
+      </article>) : <div className="role-empty role-empty-action">
+        <strong>Belum ada ulasan.</strong>
+        {role === "CUSTOMER" && <span>Ulasan dapat diberikan satu kali setelah pesanan diserahkan.</span>}
+        {role === "CUSTOMER" && <button className="role-primary-button" onClick={() => onNavigate("Pesanan Saya")}>Lihat pesanan saya</button>}
+      </div>}
     </section>
   </div>;
 }
@@ -577,7 +901,12 @@ function OrderTable({ rows }: { rows: Row[] }) {
 }
 
 function Status({ value }: { value: unknown }) {
-  const status = asText(value);
+  const rawStatus = asText(value);
+  const status = rawStatus === "Baru" ? "Menunggu konfirmasi"
+    : rawStatus === "Konfirmasi" ? "Menunggu verifikasi"
+      : rawStatus === "Menunggu" ? "Belum dibayar"
+        : rawStatus === "Gagal" || rawStatus === "Ditolak" ? "Ditolak"
+          : rawStatus;
   return <span className="role-status">{status}</span>;
 }
 

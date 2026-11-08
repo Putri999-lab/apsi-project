@@ -318,6 +318,10 @@ h1 {
   margin-bottom: 23px;
 }
 
+.summary-card strong {
+  overflow-wrap: anywhere;
+}
+
 .summary-card {
   position: relative;
   min-height: 111px;
@@ -762,6 +766,79 @@ tbody tr:hover {
   margin-top: 20px;
 }
 
+.sales-chart-label {
+  margin: 20px 20px 11px;
+}
+
+.sales-bars {
+  display: grid;
+  gap: 12px;
+  padding: 4px 20px 22px;
+}
+
+.sales-bar-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(80px, 1fr) minmax(120px, 160px);
+  align-items: center;
+  gap: 14px;
+  color: #64727b;
+  font-size: 12px;
+}
+
+.sales-bar-row strong {
+  color: #394953;
+  font-size: 12px;
+  text-align: right;
+}
+
+.sales-bar-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #f0f2f3;
+}
+
+.sales-bar-fill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--orange);
+}
+
+.production-job {
+  margin: 16px;
+  padding: 17px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.production-job-heading,
+.production-job-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.production-job-heading h3 {
+  margin: 5px 0 0;
+  color: #253640;
+  font-size: 17px;
+}
+
+.production-job .table-wrap {
+  margin-top: 15px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.production-job-footer {
+  margin-top: 14px;
+  color: #78838d;
+  font-size: 12px;
+}
+
 @media (max-width: 1100px) {
   .sidebar {
     width: 218px;
@@ -860,6 +937,22 @@ tbody tr:hover {
   .data-card-header {
     align-items: flex-start;
     padding: 16px;
+  }
+
+  .production-job-heading,
+  .production-job-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sales-bar-row {
+    grid-template-columns: minmax(70px, 100px) minmax(55px, 1fr) minmax(90px, 115px);
+    gap: 8px;
+    font-size: 10px;
+  }
+
+  .sales-bar-row strong {
+    font-size: 10px;
   }
 
   .table-toolbar {
@@ -1468,6 +1561,12 @@ tbody tr:hover {
   font-weight: 300;
 }
 
+.role-product-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .role-product-info {
   display: flex;
   flex-direction: column;
@@ -1487,8 +1586,60 @@ tbody tr:hover {
   font-weight: 600;
 }
 
+.role-product-description {
+  min-height: 28px;
+  margin: 0;
+  color: #555;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.role-product-description.unavailable {
+  color: #999;
+}
+
 .role-product-info > strong {
   font-size: 12px;
+}
+
+.role-stock-indicator {
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.role-stock-indicator.available {
+  background: #e9f4ed;
+  color: #28643b;
+}
+
+.role-stock-indicator.low {
+  background: #fff2d9;
+  color: #8a5a00;
+}
+
+.role-stock-indicator.out {
+  background: #fbe9e7;
+  color: #9c332b;
+}
+
+.role-stock-production {
+  margin-top: 12px;
+}
+
+.role-stock-production > div {
+  font-size: 11px;
+}
+
+.role-catalog-note {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #e8dfd2;
+  border-radius: 4px;
+  background: #fbf8f3;
+  color: #765d3f;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .role-quantity {
@@ -1525,8 +1676,51 @@ tbody tr:hover {
   padding: 0 19px;
 }
 
+.role-cart-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 0 19px 15px;
+}
+
+.role-cart-line,
+.role-cart-total,
+.role-payment-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #555;
+  font-size: 10px;
+}
+
+.role-cart-line button {
+  border: 0;
+  background: transparent;
+  color: #9c3d37;
+  font-size: 10px;
+  text-decoration: underline;
+}
+
+.role-cart-total,
+.role-payment-total {
+  padding-top: 10px;
+  border-top: 1px solid #eee;
+  font-weight: 600;
+}
+
+.role-payment-total {
+  margin: 10px 0;
+}
+
+.role-payment-total strong {
+  color: #292929;
+  font-size: 14px;
+}
+
 .role-checkout-grid label,
-.role-review-form label {
+.role-review-form label,
+.role-payment-method {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1536,7 +1730,9 @@ tbody tr:hover {
 
 .role-checkout-grid select,
 .role-review-form select,
-.role-review-form textarea {
+.role-review-form textarea,
+.role-payment-method select,
+.role-payment-method input {
   min-height: 36px;
   padding: 7px 9px;
   border: 1px solid #c7c7c7;
@@ -1669,6 +1865,112 @@ tbody tr:hover {
   color: #888;
   font-size: 11px;
   text-align: center;
+}
+
+.role-empty-action {
+  gap: 9px;
+}
+
+.role-empty-action strong {
+  color: #444;
+  font-size: 13px;
+}
+
+.role-empty-action > span {
+  color: #888;
+  font-size: 11px;
+}
+
+.role-order-details {
+  margin-top: 13px;
+  padding-top: 11px;
+  border-top: 1px solid #eee;
+  color: #555;
+  font-size: 10px;
+}
+
+.role-order-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.role-progress {
+  padding-top: 12px;
+}
+
+.role-progress ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.role-progress li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  color: #999;
+  text-align: center;
+}
+
+.role-progress li > span {
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d5d5d5;
+  border-radius: 50%;
+}
+
+.role-progress li.complete {
+  color: #2e805c;
+}
+
+.role-progress li.complete > span {
+  border-color: #2e805c;
+  background: #edf6f1;
+}
+
+.role-progress li small {
+  font-size: 9px;
+}
+
+.role-progress-note,
+.role-payment-note {
+  margin: 10px 0 0;
+  color: #8a653d;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.role-payment-note.success {
+  color: #2e805c;
+}
+
+.role-payment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.role-payment-card .role-order-lines {
+  padding-bottom: 0;
+}
+
+.role-payment-method small {
+  color: #888;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.role-proof-link {
+  width: fit-content;
+  color: #315a71;
+  font-size: 10px;
+  text-decoration: underline;
 }
 
 .role-review-layout {

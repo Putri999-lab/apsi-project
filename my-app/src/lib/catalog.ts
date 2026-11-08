@@ -16,6 +16,7 @@ export type FieldKind =
   | "number"
   | "money"
   | "date"
+  | "url"
   | "select"
   | "textarea";
 
@@ -40,7 +41,7 @@ export type ResourceDefinition = {
 };
 
 const orderStatuses = ["Baru", "Diproses", "Selesai", "Dibatalkan"];
-const productionStatuses = ["Diproses", "Selesai"];
+const productionStatuses = ["Menunggu", "Diproses", "Selesai"];
 const deliveryStatuses = ["Diproses", "Diserahkan"];
 
 export const resources: Record<ResourceKey, ResourceDefinition> = {
@@ -110,7 +111,9 @@ export const resources: Record<ResourceKey, ResourceDefinition> = {
       { name: "satuan_produk", label: "Satuan", kind: "text", required: true, maxLength: 10 },
       { name: "harga_produk", label: "Harga", kind: "money", required: true, min: 0 },
       { name: "stok_minimum", label: "Stok minimum", kind: "number", required: true, min: 0 },
-      { name: "stok_produk", label: "Stok saat ini", kind: "number", required: true, min: 0 },
+      { name: "stok_produk", label: "Stok aktual", kind: "number", min: 0 },
+      { name: "deskripsi_produk", label: "Deskripsi produk", kind: "textarea", maxLength: 255 },
+      { name: "url_gambar", label: "URL foto produk", kind: "url", maxLength: 500 },
     ],
   },
   orders: {
@@ -168,8 +171,9 @@ export const resources: Record<ResourceKey, ResourceDefinition> = {
         kind: "select",
         required: true,
         maxLength: 10,
-        options: ["Menunggu", "Berhasil", "Gagal"],
+        options: ["Menunggu", "Konfirmasi", "Berhasil", "Ditolak", "Gagal"],
       },
+      { name: "bukti_pembayaran_url", label: "URL bukti pembayaran", kind: "url", maxLength: 500 },
     ],
   },
   production: {
@@ -189,7 +193,7 @@ export const resources: Record<ResourceKey, ResourceDefinition> = {
         maxLength: 10,
         options: productionStatuses,
       },
-      { name: "tanggal_mulai_produksi", label: "Tanggal mulai", kind: "date", required: true },
+      { name: "tanggal_mulai_produksi", label: "Tanggal ditugaskan / mulai", kind: "date", required: true },
       { name: "tanggal_selesai_produksi", label: "Tanggal selesai", kind: "date" },
     ],
   },
