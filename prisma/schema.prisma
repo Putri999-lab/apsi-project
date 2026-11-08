@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../my-app/src/generated/prisma"
 }
 
 datasource db {
@@ -8,60 +8,55 @@ datasource db {
 }
 
 model Pelanggan {
-  id_pelanggan   String  @id @db.VarChar(10)
-  nama_pelanggan String  @db.VarChar(50)
-  jenis_kelamin  String  @db.VarChar(10)
-  no_telepon     String  @db.VarChar(16)
-  email          String  @db.VarChar(40)
-  password       String? @db.VarChar(255)
-  nama_jalan     String  @db.VarChar(50)
-  nomor          String  @db.VarChar(10)
-  kota           String  @db.VarChar(15)
-
-  pesanan Pesanan[]
+  id_pelanggan   String    @id @db.VarChar(10)
+  nama_pelanggan String    @db.VarChar(50)
+  jenis_kelamin  String    @db.VarChar(10)
+  no_telepon     String    @db.VarChar(16)
+  email          String    @db.VarChar(40)
+  nama_jalan     String    @db.VarChar(50)
+  nomor          String    @db.VarChar(10)
+  kota           String    @db.VarChar(15)
+  password       String?   @db.VarChar(255)
+  pesanan        Pesanan[]
 }
 
 model Pengguna {
-  id_pengguna       String   @id @db.VarChar(10)
-  nama_pengguna     String   @db.VarChar(50)
-  jenis_kelamin     String   @db.VarChar(10)
-  no_telepon        String   @db.VarChar(16)
-  email             String   @db.VarChar(40)
-  password          String?  @db.VarChar(255)
-  peran             String   @db.VarChar(10)
-  tanggal_bergabung DateTime @db.Date
-
-  pesananAdmin Pesanan[] @relation("AdminPesanan")
-  produksi     Produksi[] @relation("KaryawanProduksi")
+  id_pengguna       String     @id @db.VarChar(10)
+  nama_pengguna     String     @db.VarChar(50)
+  jenis_kelamin     String     @db.VarChar(10)
+  no_telepon        String     @db.VarChar(16)
+  email             String     @db.VarChar(40)
+  peran             String     @db.VarChar(10)
+  tanggal_bergabung DateTime   @db.Date
+  password          String?    @db.VarChar(255)
+  pesananAdmin      Pesanan[]  @relation("AdminPesanan")
+  produksi          Produksi[] @relation("KaryawanProduksi")
 }
 
 model Produk {
-  id_produk       String   @id @db.VarChar(10)
-  nama_produk     String   @db.VarChar(30)
-  kategori_produk String   @db.VarChar(20)
-  satuan_produk   String   @db.VarChar(10)
+  id_produk       String          @id @db.VarChar(10)
+  nama_produk     String          @db.VarChar(30)
+  kategori_produk String          @db.VarChar(20)
+  satuan_produk   String          @db.VarChar(10)
   stok_minimum    Int
   stok_produk     Int?
-  harga_produk    Decimal? @db.Decimal(19, 0)
-
-  detailPesanan DetailPesanan[]
+  harga_produk    Decimal?        @db.Decimal(19, 0)
+  detailPesanan   DetailPesanan[]
 }
 
 model Pesanan {
-  no_pesanan      String   @id @db.VarChar(10)
-  id_pelanggan    String   @db.VarChar(10)
-  id_admin        String   @db.VarChar(10)
-  tanggal_pesanan DateTime @db.Date
-  status_pesanan  String   @db.VarChar(10)
-
-  pelanggan Pelanggan @relation(fields: [id_pelanggan], references: [id_pelanggan])
-  admin     Pengguna  @relation("AdminPesanan", fields: [id_admin], references: [id_pengguna])
-
-  detailPesanan DetailPesanan[]
-  pembayaran    Pembayaran[]
-  produksi      Produksi[]
-  penyerahan    Penyerahan[]
-  ulasan        Ulasan[]
+  no_pesanan      String          @id @db.VarChar(10)
+  id_pelanggan    String          @db.VarChar(10)
+  id_admin        String          @db.VarChar(10)
+  tanggal_pesanan DateTime        @db.Date
+  status_pesanan  String          @db.VarChar(10)
+  detailPesanan   DetailPesanan[]
+  pembayaran      Pembayaran[]
+  penyerahan      Penyerahan[]
+  admin           Pengguna        @relation("AdminPesanan", fields: [id_admin], references: [id_pengguna], onDelete: NoAction, onUpdate: NoAction)
+  pelanggan       Pelanggan       @relation(fields: [id_pelanggan], references: [id_pelanggan], onDelete: NoAction, onUpdate: NoAction)
+  produksi        Produksi[]
+  ulasan          Ulasan[]
 }
 
 model DetailPesanan {
@@ -71,9 +66,8 @@ model DetailPesanan {
   harga_satuan        Decimal @db.Decimal(19, 0)
   stok_produk_sebelum Int
   stok_produk_sesudah Int
-
-  pesanan Pesanan @relation(fields: [no_pesanan], references: [no_pesanan])
-  produk  Produk  @relation(fields: [id_produk], references: [id_produk])
+  produk              Produk  @relation(fields: [id_produk], references: [id_produk], onDelete: NoAction, onUpdate: NoAction)
+  pesanan             Pesanan @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 
   @@id([no_pesanan, id_produk])
 }
@@ -85,20 +79,18 @@ model Pembayaran {
   jumlah_bayar      Decimal  @db.Decimal(19, 0)
   tanggal_bayar     DateTime @db.Date
   status_pembayaran String   @db.VarChar(10)
-
-  pesanan Pesanan @relation(fields: [no_pesanan], references: [no_pesanan])
+  pesanan           Pesanan  @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model Produksi {
-  id_produksi             String    @id @db.VarChar(10)
-  no_pesanan              String    @db.VarChar(10)
-  id_karyawan             String    @db.VarChar(10)
-  status_produksi         String    @db.VarChar(10)
-  tanggal_mulai_produksi  DateTime  @db.Date
+  id_produksi              String    @id @db.VarChar(10)
+  no_pesanan               String    @db.VarChar(10)
+  id_karyawan              String    @db.VarChar(10)
+  status_produksi          String    @db.VarChar(10)
+  tanggal_mulai_produksi   DateTime  @db.Date
   tanggal_selesai_produksi DateTime? @db.Date
-
-  pesanan  Pesanan  @relation(fields: [no_pesanan], references: [no_pesanan])
-  karyawan Pengguna @relation("KaryawanProduksi", fields: [id_karyawan], references: [id_pengguna])
+  karyawan                 Pengguna  @relation("KaryawanProduksi", fields: [id_karyawan], references: [id_pengguna], onDelete: NoAction, onUpdate: NoAction)
+  pesanan                  Pesanan   @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model Penyerahan {
@@ -107,8 +99,7 @@ model Penyerahan {
   metode_penyerahan  String   @db.VarChar(20)
   status_penyerahan  String   @db.VarChar(15)
   tanggal_penyerahan DateTime @db.Date
-
-  pesanan Pesanan @relation(fields: [no_pesanan], references: [no_pesanan])
+  pesanan            Pesanan  @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model Ulasan {
@@ -117,6 +108,5 @@ model Ulasan {
   rating         Int
   isi_ulasan     String   @db.VarChar(255)
   tanggal_ulasan DateTime @db.Date
-
-  pesanan Pesanan @relation(fields: [no_pesanan], references: [no_pesanan])
+  pesanan        Pesanan  @relation(fields: [no_pesanan], references: [no_pesanan], onDelete: NoAction, onUpdate: NoAction)
 }

@@ -1,18 +1,18 @@
-services:
+﻿services:
   db:
     image: postgres:16
     container_name: apsi-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: PasswordKita123
-      POSTGRES_DB: apsi_db
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in root .env}
+      POSTGRES_DB: ${POSTGRES_DB:-apsi_db}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d apsi_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-apsi_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -27,7 +27,11 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://postgres:PasswordKita123@db:5432/apsi_db?schema=public
+      DATABASE_URL: ${DOCKER_DATABASE_URL:?Set DOCKER_DATABASE_URL in root .env}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in root .env}
+      EMPLOYEE_REGISTRATION_CODE: ${EMPLOYEE_REGISTRATION_CODE:-}
+      OWNER_REGISTRATION_CODE: ${OWNER_REGISTRATION_CODE:-}
+      ADMIN_REGISTRATION_CODE: ${ADMIN_REGISTRATION_CODE:-}
       PORT: 3000
     depends_on:
       db:

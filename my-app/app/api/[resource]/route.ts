@@ -1,12 +1,16 @@
+import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
-import type { PoolClient } from "pg";
+import { Prisma, type PrismaClient } from "@/src/generated/prisma/client";
 import { resources, type ResourceKey } from "@/src/lib/catalog";
-import { pool } from "@/src/lib/db";
+import { getCurrentUser, type AuthUser } from "@/src/lib/auth";
+import { prisma } from "@/src/lib/db";
 import { queries } from "@/src/lib/queries";
+import { executeSql, queryRows } from "@/src/lib/prisma-raw";
 
 type JsonRecord = Record<string, unknown>;
 type Operation = "create" | "update";
+type QueryClient = Pick<PrismaClient, "$queryRawUnsafe" | "$executeRawUnsafe">;
 
 class RequestError extends Error {
   constructor(
@@ -15,6 +19,18 @@ class RequestError extends Error {
   ) {
     super(message);
   }
+}
+
+async function query<T extends Record<string, unknown> = Record<string, unknown>>(
+  client: QueryClient,
+  sql: string,
+  values: unknown[] = [],
+) {
+  if (/^\s*(SELECT|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
+    return queryRows<T>(client, sql, values);
+  }
+  const rowCount = await executeSql(client, sql, values);
+  return { rows: [] as T[], rowCount };
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -171,19 +187,19 @@ function databaseError(error: unknown) {
 
   const code =
     isRecord(error) && typeof error.code === "string" ? error.code : undefined;
-  if (code === "23505") {
+  if (code === "P2002" || code === "23505") {
     return NextResponse.json(
       { error: "A record with the same primary key already exists." },
       { status: 409 },
     );
   }
-  if (code === "23503") {
+  if (code === "P2003" || code === "23503") {
     return NextResponse.json(
       { error: "A selected related record does not exist, or this record is still referenced by related data." },
       { status: 409 },
     );
   }
-  if (code === "22001" || code === "22P02" || code === "22003") {
+  if (["P2000", "P2011", "P2012", "22001", "22P02", "22003"].includes(code ?? "")) {
     return NextResponse.json(
       { error: "One or more values exceed the database's accepted format or range." },
       { status: 400 },
@@ -204,23 +220,82 @@ function parseResource(value: string): ResourceKey {
   return value as ResourceKey;
 }
 
-async function getList(resource: ResourceKey, request: Request) {
-  const query = new URL(request.url).searchParams.get("q")?.trim();
-  if (query && query.length > 100) {
+function canAccess(user: AuthUser, resource: ResourceKey, method: string) {
+  if (user.role === "ADMIN") return true;
+  if (method === "GET") {
+    if (user.role === "OWNER") {
+      return !["customers", "users"].includes(resource);
+    }
+    if (user.role === "EMPLOYEE") {
+      return ["products", "orders", "order-details", "production"].includes(resource);
+    }
+    return ["products", "orders", "order-details", "payments", "handover", "reviews"].includes(resource);
+  }
+  if (user.role === "EMPLOYEE") return resource === "production" && method === "PUT";
+  if (user.role === "CUSTOMER") {
+    return resource === "reviews" && method === "POST";
+  }
+  return false;
+}
+
+function assertCanAccess(user: AuthUser, resource: ResourceKey, method: string) {
+  if (!canAccess(user, resource, method)) {
+    throw new RequestError("Anda tidak memiliki izin untuk tindakan ini.", 403);
+  }
+}
+
+function scopeFor(user: AuthUser, resource: ResourceKey) {
+  if (user.role === "CUSTOMER") {
+    switch (resource) {
+      case "orders":
+        return { clause: `p.id_pelanggan = $1`, values: [user.id] };
+      case "order-details":
+        return { clause: `EXISTS (SELECT 1 FROM "Pesanan" own_order WHERE own_order.no_pesanan = dp.no_pesanan AND own_order.id_pelanggan = $1)`, values: [user.id] };
+      case "payments":
+        return { clause: `EXISTS (SELECT 1 FROM "Pesanan" own_order WHERE own_order.no_pesanan = py.no_pesanan AND own_order.id_pelanggan = $1)`, values: [user.id] };
+      case "handover":
+        return { clause: `EXISTS (SELECT 1 FROM "Pesanan" own_order WHERE own_order.no_pesanan = s.no_pesanan AND own_order.id_pelanggan = $1)`, values: [user.id] };
+      case "reviews":
+        return { clause: `EXISTS (SELECT 1 FROM "Pesanan" own_order WHERE own_order.no_pesanan = u.no_pesanan AND own_order.id_pelanggan = $1)`, values: [user.id] };
+      default:
+        return { clause: "", values: [] as string[] };
+    }
+  }
+  if (user.role === "EMPLOYEE") {
+    switch (resource) {
+      case "production":
+        return { clause: `prd.id_karyawan = $1`, values: [user.id] };
+      case "orders":
+        return { clause: `EXISTS (SELECT 1 FROM "Produksi" assigned WHERE assigned.no_pesanan = p.no_pesanan AND assigned.id_karyawan = $1)`, values: [user.id] };
+      case "order-details":
+        return { clause: `EXISTS (SELECT 1 FROM "Produksi" assigned WHERE assigned.no_pesanan = dp.no_pesanan AND assigned.id_karyawan = $1)`, values: [user.id] };
+      default:
+        return { clause: "", values: [] as string[] };
+    }
+  }
+  return { clause: "", values: [] as string[] };
+}
+
+async function getList(resource: ResourceKey, request: Request, user: AuthUser) {
+  const searchTerm = new URL(request.url).searchParams.get("q")?.trim();
+  if (searchTerm && searchTerm.length > 100) {
     throw new RequestError("Search text must be 100 characters or fewer.");
   }
   const definition = queries[resource];
   let sql = definition.select;
-  const values: string[] = [];
+  const scope = scopeFor(user, resource);
+  const values: string[] = [...scope.values];
+  const clauses = scope.clause ? [scope.clause] : [];
 
-  if (query) {
-    values.push(`%${query}%`);
+  if (searchTerm) {
+    values.push(`%${searchTerm}%`);
     const searchColumns = resources[resource].searchFields;
-    sql += ` WHERE ${searchColumns.map((column) => `${column}::text ILIKE $1`).join(" OR ")}`;
+    clauses.push(`(${searchColumns.map((column) => `${column}::text ILIKE $${values.length}`).join(" OR ")})`);
   }
 
+  if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
   sql += ` ORDER BY ${definition.orderBy}`;
-  const result = await pool.query(sql, values);
+  const result = await query(prisma, sql, values);
   return NextResponse.json(result.rows);
 }
 
@@ -245,9 +320,10 @@ function parseDetailValues(values: unknown) {
   return { orderNumber: orderNumber.trim(), productId: productId.trim(), quantity };
 }
 
-async function detailCreate(client: PoolClient, values: unknown) {
+async function detailCreate(client: Prisma.TransactionClient, values: unknown) {
   const detail = parseDetailValues(values);
-  const product = await client.query(
+  const product = await query<{ stok_produk: number | null; harga_produk: string | null }>(
+    client,
     `SELECT stok_produk, harga_produk
      FROM "Produk"
      WHERE id_produk = $1
@@ -268,7 +344,7 @@ async function detailCreate(client: PoolClient, values: unknown) {
   }
 
   const stockAfter = stock - detail.quantity;
-  await client.query(
+  await query(client,
     `INSERT INTO "DetailPesanan"
        (no_pesanan, id_produk, jumlah, harga_satuan, stok_produk_sebelum, stok_produk_sesudah)
      VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -281,20 +357,21 @@ async function detailCreate(client: PoolClient, values: unknown) {
       stockAfter,
     ],
   );
-  await client.query(`UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
+  await query(client, `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
     stockAfter,
     detail.productId,
   ]);
   return { ...detail, harga_satuan: price, stok_produk_sebelum: stock, stok_produk_sesudah: stockAfter };
 }
 
-async function detailUpdate(client: PoolClient, keys: string[], values: unknown) {
+async function detailUpdate(client: Prisma.TransactionClient, keys: string[], values: unknown) {
   const detail = parseDetailValues(values);
   if (keys[0] !== detail.orderNumber || keys[1] !== detail.productId) {
     throw new RequestError("Order and product keys cannot be changed.", 400);
   }
 
-  const product = await client.query(
+  const product = await query<{ stok_produk: number | null }>(
+    client,
     `SELECT stok_produk
      FROM "Produk"
      WHERE id_produk = $1
@@ -306,7 +383,8 @@ async function detailUpdate(client: PoolClient, keys: string[], values: unknown)
     throw new RequestError("Stok produk belum diatur; stok detail tidak dapat diselaraskan.", 409);
   }
 
-  const currentDetail = await client.query(
+  const currentDetail = await query<{ jumlah: number; harga_satuan: string }>(
+    client,
     `SELECT jumlah, harga_satuan
      FROM "DetailPesanan"
      WHERE no_pesanan = $1 AND id_produk = $2
@@ -322,13 +400,13 @@ async function detailUpdate(client: PoolClient, keys: string[], values: unknown)
     throw new RequestError("Stok produk tidak mencukupi.", 409);
   }
   const stockAfter = available - detail.quantity;
-  await client.query(
+  await query(client,
     `UPDATE "DetailPesanan"
      SET jumlah = $1, stok_produk_sebelum = $2, stok_produk_sesudah = $3
      WHERE no_pesanan = $4 AND id_produk = $5`,
     [detail.quantity, available, stockAfter, ...keys],
   );
-  await client.query(`UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
+  await query(client, `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`, [
     stockAfter,
     detail.productId,
   ]);
@@ -340,8 +418,9 @@ async function detailUpdate(client: PoolClient, keys: string[], values: unknown)
   };
 }
 
-async function detailDelete(client: PoolClient, keys: string[]) {
-  const product = await client.query(
+async function detailDelete(client: Prisma.TransactionClient, keys: string[]) {
+  const product = await query<{ stok_produk: number | null }>(
+    client,
     `SELECT stok_produk
      FROM "Produk"
      WHERE id_produk = $1
@@ -353,7 +432,8 @@ async function detailDelete(client: PoolClient, keys: string[]) {
     throw new RequestError("Stok produk belum diatur; stok detail tidak dapat diselaraskan.", 409);
   }
 
-  const currentDetail = await client.query(
+  const currentDetail = await query<{ jumlah: number }>(
+    client,
     `SELECT jumlah
      FROM "DetailPesanan"
      WHERE no_pesanan = $1 AND id_produk = $2
@@ -364,32 +444,21 @@ async function detailDelete(client: PoolClient, keys: string[]) {
     throw new RequestError("Order detail not found.", 404);
   }
 
-  await client.query(
+  await query(client,
     `UPDATE "Produk" SET stok_produk = $1 WHERE id_produk = $2`,
     [stock + Number(currentDetail.rows[0].jumlah), keys[1]],
   );
-  await client.query(
+  await query(client,
     `DELETE FROM "DetailPesanan" WHERE no_pesanan = $1 AND id_produk = $2`,
     keys,
   );
 }
 
-async function inTransaction<T>(work: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await work(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+async function inTransaction<T>(work: (client: Prisma.TransactionClient) => Promise<T>) {
+  return prisma.$transaction(work, { maxWait: 5000, timeout: 15000 });
 }
 
-async function saveRecord(resource: ResourceKey, operation: Operation, body: unknown) {
+async function saveRecord(resource: ResourceKey, operation: Operation, body: unknown, user: AuthUser) {
   if (!isRecord(body)) {
     throw new RequestError("Request body must be an object.");
   }
@@ -404,13 +473,36 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
     return inTransaction((client) => detailUpdate(client, keys, body.values));
   }
 
+  const keys = operation === "update" ? normalizeKeys(resource, body.keys) : [];
+  if (
+    (resource === "customers" || resource === "users") &&
+    typeof values.email === "string"
+  ) {
+    const excludeCustomer = resource === "customers" && operation === "update"
+      ? ` AND id_pelanggan <> $2`
+      : "";
+    const excludeUser = resource === "users" && operation === "update"
+      ? ` AND id_pengguna <> $2`
+      : "";
+    const emailValues = [values.email.toLocaleLowerCase("en")];
+    if (excludeCustomer || excludeUser) emailValues.push(keys[0]);
+    const existing = await query(prisma,
+      `SELECT 1 FROM "Pelanggan" WHERE lower(email) = $1${excludeCustomer}
+       UNION ALL
+       SELECT 1 FROM "Pengguna" WHERE lower(email) = $1${excludeUser}
+       LIMIT 1`,
+      emailValues,
+    );
+    if (existing.rowCount) throw new RequestError("Email sudah digunakan.", 409);
+  }
+
   if (operation === "create") {
     const columns = Object.keys(values);
     if (columns.length === 0) {
       throw new RequestError("At least one field is required.");
     }
     const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
-    const result = await pool.query(
+    const result = await query(prisma,
       `INSERT INTO ${definition.table} (${columns.map((column) => `"${column}"`).join(", ")})
        VALUES (${placeholders})
        RETURNING ${definition.keyFields.map((field) => `"${field}"`).join(", ")}`,
@@ -419,7 +511,6 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
     return result.rows[0];
   }
 
-  const keys = normalizeKeys(resource, body.keys);
   const updatedFields = Object.keys(values).filter(
     (field) => !definition.keyFields.includes(field),
   );
@@ -429,13 +520,20 @@ async function saveRecord(resource: ResourceKey, operation: Operation, body: unk
   const setClause = updatedFields
     .map((field, index) => `"${field}" = $${index + 1}`)
     .join(", ");
-  const whereClause = keyWhere(resource, updatedFields.length + 1);
-  const result = await pool.query(
+  const scopeClause = user.role === "EMPLOYEE" && resource === "production"
+    ? ` AND "id_karyawan" = $${updatedFields.length + keys.length + 1}`
+    : "";
+  const whereClause = `${keyWhere(resource, updatedFields.length + 1)}${scopeClause}`;
+  const result = await query(prisma,
     `UPDATE ${definition.table}
      SET ${setClause}
      WHERE ${whereClause}
      RETURNING ${definition.keyFields.map((field) => `"${field}"`).join(", ")}`,
-    [...updatedFields.map((field) => values[field]), ...keys],
+    [
+      ...updatedFields.map((field) => values[field]),
+      ...keys,
+      ...(scopeClause ? [user.id] : []),
+    ],
   );
   if (result.rowCount === 0) {
     throw new RequestError("Record not found.", 404);
@@ -451,7 +549,7 @@ async function deleteRecord(resource: ResourceKey, body: unknown) {
     return inTransaction((client) => detailDelete(client, keys));
   }
 
-  const result = await pool.query(
+  const result = await query(prisma,
     `DELETE FROM ${definition.table}
      WHERE ${keyWhere(resource)}
      RETURNING ${definition.keyFields.map((field) => `"${field}"`).join(", ")}`,
@@ -470,7 +568,10 @@ export async function GET(
   try {
     const { resource: resourceName } = await context.params;
     const resource = parseResource(resourceName);
-    return await getList(resource, request);
+    const user = await getCurrentUser();
+    if (!user) throw new RequestError("Silakan masuk terlebih dahulu.", 401);
+    assertCanAccess(user, resource, "GET");
+    return await getList(resource, request, user);
   } catch (error) {
     return databaseError(error);
   }
@@ -491,7 +592,17 @@ export async function POST(
   try {
     const { resource: resourceName } = await context.params;
     const resource = parseResource(resourceName);
-    const result = await saveRecord(resource, "create", await requestBody(request));
+    const user = await getCurrentUser();
+    if (!user) throw new RequestError("Silakan masuk terlebih dahulu.", 401);
+    assertCanAccess(user, resource, "POST");
+    if (user.role === "CUSTOMER") {
+      if (resource !== "reviews") {
+        throw new RequestError("Buat pesanan melalui alur pemesanan pelanggan.", 400);
+      }
+      const body = await requestBody(request);
+      return NextResponse.json(await createCustomerReview(user, body), { status: 201 });
+    }
+    const result = await saveRecord(resource, "create", await requestBody(request), user);
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return databaseError(error);
@@ -505,7 +616,17 @@ export async function PUT(
   try {
     const { resource: resourceName } = await context.params;
     const resource = parseResource(resourceName);
-    const result = await saveRecord(resource, "update", await requestBody(request));
+    const user = await getCurrentUser();
+    if (!user) throw new RequestError("Silakan masuk terlebih dahulu.", 401);
+    assertCanAccess(user, resource, "PUT");
+    const body = await requestBody(request);
+    if (user.role === "EMPLOYEE") {
+      const values = isRecord(body.values) ? Object.keys(body.values) : [];
+      if (!values.length || values.some((field) => !["status_produksi", "tanggal_selesai_produksi"].includes(field))) {
+        throw new RequestError("Karyawan hanya dapat memperbarui status dan tanggal selesai produksi.", 403);
+      }
+    }
+    const result = await saveRecord(resource, "update", body, user);
     return NextResponse.json(result);
   } catch (error) {
     return databaseError(error);
@@ -519,9 +640,59 @@ export async function DELETE(
   try {
     const { resource: resourceName } = await context.params;
     const resource = parseResource(resourceName);
+    const user = await getCurrentUser();
+    if (!user) throw new RequestError("Silakan masuk terlebih dahulu.", 401);
+    assertCanAccess(user, resource, "DELETE");
     const result = await deleteRecord(resource, await requestBody(request));
     return NextResponse.json(result);
   } catch (error) {
     return databaseError(error);
   }
+}
+
+async function createCustomerReview(user: AuthUser, body: unknown) {
+  if (!isRecord(body) || !isRecord(body.values)) {
+    throw new RequestError("Form data must be an object.");
+  }
+  const orderNumber = body.values.no_pesanan;
+  const rating = Number(body.values.rating);
+  const review = body.values.isi_ulasan;
+  if (typeof orderNumber !== "string" || !orderNumber.trim() || orderNumber.length > 10) {
+    throw new RequestError("Pilih pesanan yang valid.");
+  }
+  if (!Number.isSafeInteger(rating) || rating < 1 || rating > 5) {
+    throw new RequestError("Rating harus antara 1 dan 5.");
+  }
+  if (typeof review !== "string" || !review.trim() || review.trim().length > 255) {
+    throw new RequestError("Ulasan wajib diisi dan maksimal 255 karakter.");
+  }
+  return inTransaction(async (client) => {
+    await client.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${orderNumber.trim()}))`);
+    const order = await query(client,
+      `SELECT 1 FROM "Pesanan" p
+       JOIN "Penyerahan" h ON h.no_pesanan = p.no_pesanan AND h.status_penyerahan = 'Diserahkan'
+       WHERE p.no_pesanan = $1 AND p.id_pelanggan = $2`,
+      [orderNumber.trim(), user.id],
+    );
+    if (!order.rowCount) throw new RequestError("Ulasan tersedia setelah pesanan diserahkan.", 409);
+    const existing = await query(client,
+      `SELECT 1 FROM "Ulasan" WHERE no_pesanan = $1`,
+      [orderNumber.trim()],
+    );
+    if (existing.rowCount) throw new RequestError("Pesanan ini sudah memiliki ulasan.", 409);
+
+    let id: string;
+    for (let attempt = 0; ; attempt++) {
+      id = `UL${randomBytes(4).toString("hex").toUpperCase()}`;
+      const collision = await query(client, `SELECT 1 FROM "Ulasan" WHERE id_ulasan = $1`, [id]);
+      if (!collision.rowCount) break;
+      if (attempt === 4) throw new RequestError("ID ulasan tidak dapat dibuat. Coba lagi.", 500);
+    }
+    await query(client,
+      `INSERT INTO "Ulasan" (id_ulasan, no_pesanan, rating, isi_ulasan, tanggal_ulasan)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE)`,
+      [id, orderNumber.trim(), rating, review.trim()],
+    );
+    return { id_ulasan: id, no_pesanan: orderNumber.trim(), rating, isi_ulasan: review.trim() };
+  });
 }

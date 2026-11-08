@@ -1,7 +1,9 @@
 import "server-only";
+
+import { PrismaPg } from "@prisma/adapter-pg";
 import { config } from "dotenv";
-import { Pool } from "pg";
 import { resolve } from "node:path";
+import { PrismaClient } from "@/src/generated/prisma/client";
 
 if (!process.env.DATABASE_URL) {
   const result = config({ path: resolve(process.cwd(), "..", ".env") });
@@ -16,17 +18,14 @@ if (!process.env.DATABASE_URL) {
   );
 }
 
-const globalForPg = globalThis as typeof globalThis & { apsiPool?: Pool };
+const globalForPrisma = globalThis as typeof globalThis & { apsiPrisma?: PrismaClient };
 
-export const pool =
-  globalForPg.apsiPool ??
-  new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 10,
-    connectionTimeoutMillis: 5000,
-    idleTimeoutMillis: 30000,
+export const prisma =
+  globalForPrisma.apsiPrisma ??
+  new PrismaClient({
+    adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
   });
 
 if (process.env.NODE_ENV !== "production") {
-  globalForPg.apsiPool = pool;
+  globalForPrisma.apsiPrisma = prisma;
 }

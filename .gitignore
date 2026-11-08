@@ -22,6 +22,12 @@ next-env.d.ts
 
 # Prisma generated client
 /generated/prisma
+/my-app/src/generated/prisma
+
+# Database exports and backups
+*.dump
+*.backup
+*.bak
 
 # Logs
 *.log
